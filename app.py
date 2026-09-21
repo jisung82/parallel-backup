@@ -1613,7 +1613,7 @@ class ParallelBackupApp:
         source, name, destinations, parallel, keep = validated
         exclude_patterns = normalize_patterns(self.exclude_var.get())
 
-        base_name = f"{name}_{datetime.now().strftime(TIMESTAMP_FORMAT)}"
+        snapshot_name = f"{name}_{datetime.now().strftime(TIMESTAMP_FORMAT)}"
 
         self.save_profile(silent=True)
         incremental = self.incremental_var.get()
@@ -1635,7 +1635,7 @@ class ParallelBackupApp:
 
         self.write_log(f"[START] {source}")
         self.write_log(f"[TARGETS] {len(destinations)}개 | workers={parallel}")
-        self.write_log(f"[NAME] {base_name}")
+        self.write_log(f"[NAME] {snapshot_name}")
         self.write_log(f"[KEEP] {keep}")
         self.write_log(
             f"[OPTIONS] mode={self.backup_mode_var.get()} "
@@ -1651,6 +1651,7 @@ class ParallelBackupApp:
             args=(
                 source,
                 name,
+                snapshot_name,
                 destinations,
                 parallel,
                 keep,
@@ -1665,7 +1666,8 @@ class ParallelBackupApp:
     def run_backup(
         self,
         source: Path,
-        base_name: str,
+        backup_prefix: str,
+        snapshot_name: str,
         destinations: list[Path],
         parallel: int,
         keep: int,
@@ -1722,7 +1724,8 @@ class ParallelBackupApp:
                     executor.submit(
                         self.backup_one_destination,
                         source,
-                        name,
+                        backup_prefix,
+                        snapshot_name,
                         destination,
                         source_data,
                         keep,
@@ -1774,7 +1777,8 @@ class ParallelBackupApp:
             self.root.after(0, finish)
 
         except Exception as exc:
-            self.write_log(f"[FATAL] {exc}")
+            error_text = str(exc)
+            self.write_log(f"[FATAL] {error_text}")
 
             def finish_error():
                 self.running = False
@@ -1784,14 +1788,15 @@ class ParallelBackupApp:
                 self._stop_operation_timer()
                 self.status_var.set(f"실패 · {elapsed_text}")
                 self._refresh_header()
-                messagebox.showerror("백업 실패", f"{exc}\n\n소요 시간: {elapsed_text}")
+                messagebox.showerror("백업 실패", f"{error_text}\n\n소요 시간: {elapsed_text}")
 
             self.root.after(0, finish_error)
 
     def backup_one_destination(
         self,
         source: Path,
-        requested_name: str,
+        backup_prefix: str,
+        snapshot_name: str,
         destination: Path,
         source_data: dict,
         keep: int,
@@ -1804,7 +1809,7 @@ class ParallelBackupApp:
         cleanup_stale_partials(destination)
         backup_name = make_unique_backup_name(
             destination,
-            f"{requested_name}_{datetime.now().strftime(TIMESTAMP_FORMAT)}",
+            snapshot_name,
         )
         final_target = destination / backup_name
         partial_target = destination / f".parallel-backup.partial-{uuid.uuid4().hex}"
@@ -1820,7 +1825,7 @@ class ParallelBackupApp:
             if incremental:
                 previous_dir, previous_manifest = find_latest_verified_backup(
                     destination,
-                    f"{requested_name}_",
+                    f"{backup_prefix}_",
                     source,
                 )
 
@@ -1991,7 +1996,7 @@ class ParallelBackupApp:
 
             snapshots = list_verified_snapshots(
                 destination,
-                f"{requested_name}_",
+                f"{backup_prefix}_",
                 source,
             )
             for old_snapshot, _ in snapshots[keep:]:
