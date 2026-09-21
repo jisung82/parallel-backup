@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 
 title Parallel Backup
 
@@ -10,35 +10,63 @@ echo        Parallel Backup Launcher
 echo ==========================================
 echo.
 
-where py >nul 2>&1
-if %errorlevel%==0 goto RUN_PY
+set "PYTHON_EXE="
 
-where python >nul 2>&1
-if %errorlevel%==0 goto RUN_PYTHON
+rem 1. Prefer python.exe available on PATH.
+for /f "delims=" %%P in ('where python.exe 2^>nul') do (
+    set "PYTHON_EXE=%%P"
+    goto RUN
+)
 
-echo [ERROR] Python is not installed or not in PATH.
+rem 2. Try the Python launcher explicitly.
+for /f "delims=" %%P in ('where py.exe 2^>nul') do (
+    set "PYTHON_EXE=%%P"
+    goto RUN_LAUNCHER
+)
+
+rem 3. Common per-user Python installation locations.
+for /d %%P in ("%LocalAppData%\Programs\Python\Python*") do (
+    if exist "%%~fP\python.exe" (
+        set "PYTHON_EXE=%%~fP\python.exe"
+        goto RUN
+    )
+)
+
+rem 4. Common system-wide Python installation locations.
+for /d %%P in ("%ProgramFiles%\Python*") do (
+    if exist "%%~fP\python.exe" (
+        set "PYTHON_EXE=%%~fP\python.exe"
+        goto RUN
+    )
+)
+
+echo [ERROR] Python을 찾을 수 없습니다.
 echo.
-echo Install Python from:
+echo 먼저 Python을 설치하거나 PATH에 추가해야 합니다.
 echo https://www.python.org/downloads/windows/
 echo.
 pause
-exit /b 1
+exit /b 9009
 
-:RUN_PY
+:RUN
+echo Python: "%PYTHON_EXE%"
 echo Starting Parallel Backup...
-py -3 "%~dp0app.py"
+"%PYTHON_EXE%" "%~dp0app.py"
 set "EXIT_CODE=%errorlevel%"
 goto END
 
-:RUN_PYTHON
+:RUN_LAUNCHER
+echo Python Launcher: "%PYTHON_EXE%"
 echo Starting Parallel Backup...
-python "%~dp0app.py"
+"%PYTHON_EXE%" -3 "%~dp0app.py"
 set "EXIT_CODE=%errorlevel%"
 goto END
 
 :END
 echo.
-if not "%EXIT_CODE%"=="0" (
+if "%EXIT_CODE%"=="0" (
+    echo Parallel Backup closed normally.
+) else (
     echo Parallel Backup exited with code %EXIT_CODE%.
     pause
 )
