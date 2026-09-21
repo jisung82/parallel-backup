@@ -994,7 +994,13 @@ class ParallelBackupApp:
 
             icon_wrap = tk.Frame(
                 card,
-                bg=self.colors["soft_indigo"] if color != self.colors["danger"] else "#FEF2F2",
+                bg=(
+                    "#FEF2F2"
+                    if color == self.colors["danger"]
+                    else "#ECFEFF"
+                    if color == "#0F9D96"
+                    else self.colors["soft_indigo"]
+                ),
                 width=56,
                 height=56,
             )
@@ -1052,6 +1058,7 @@ class ParallelBackupApp:
                 "icon": icon_circle,
                 "title": title_label,
                 "text": desc_label,
+                "text_frame": text_frame,
                 "color": color,
             }
 
@@ -2017,6 +2024,7 @@ class ParallelBackupApp:
                     bg=tint,
                     fg=color,
                 )
+                card["text_frame"].configure(bg=tint)
                 card["text"].configure(
                     bg=tint,
                     fg=self.colors["muted"],
@@ -2036,6 +2044,7 @@ class ParallelBackupApp:
                         else self.colors["soft_indigo"]
                     )
                 )
+                card["text_frame"].configure(bg=self.colors["surface"])
                 card["title"].configure(
                     bg=self.colors["surface"],
                     fg=color,
