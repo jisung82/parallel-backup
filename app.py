@@ -28,7 +28,7 @@ DEFAULT_FREE_SPACE_RESERVE = 64 * 1024 * 1024
 
 
 def show_windows_notification(title, message):
-    """Show a Windows toast notification, with sound fallback."""
+    """Show a Windows toast notification, with sound/taskbar fallback."""
     if os.name != "nt":
         return
 
@@ -41,9 +41,9 @@ def show_windows_notification(title, message):
         "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, "
         "ContentType = WindowsRuntime] > $null; "
         "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument; "
-        f"$xml.LoadXml('<toast><visual><binding template="ToastGeneric">"
-        f"<text>{safe_title}</text><text>{safe_message}</text>"
-        f"</binding></visual></toast>'); "
+        f'$xml.LoadXml("<toast><visual><binding template="ToastGeneric">'
+        f'<text>{safe_title}</text><text>{safe_message}</text>'
+        f'</binding></visual></toast>"); '
         "$toast = New-Object Windows.UI.Notifications.ToastNotification $xml; "
         "[Windows.UI.Notifications.ToastNotificationManager]::"
         "CreateToastNotifier('Parallel Backup').Show($toast)"
