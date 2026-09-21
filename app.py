@@ -723,6 +723,7 @@ class ParallelBackupApp:
                         incremental,
                         verify,
                         hardlink,
+                        exclude_patterns,
                     ): destination
                     for destination in destinations
                 }
@@ -783,6 +784,7 @@ class ParallelBackupApp:
         incremental: bool,
         verify: bool,
         hardlink: bool,
+        exclude_patterns,
     ):
         destination.mkdir(parents=True, exist_ok=True)
         cleanup_stale_partials(destination)
@@ -801,7 +803,7 @@ class ParallelBackupApp:
         try:
             destination.mkdir(parents=True, exist_ok=True)
 
-            if self.incremental_var.get():
+            if incremental:
                 previous_dir, previous_manifest = find_latest_verified_backup(
                     destination,
                     f"{requested_name}_",
@@ -854,8 +856,8 @@ class ParallelBackupApp:
                 old_info = previous_files.get(rel)
                 old_file = previous_dir / Path(rel) if previous_dir else None
                 can_reuse = bool(
-                    self.incremental_var.get()
-                    and self.hardlink_var.get()
+                    incremental
+                    and hardlink
                     and old_info
                     and old_file
                     and old_file.is_file()
@@ -885,7 +887,7 @@ class ParallelBackupApp:
                 "created_at": datetime.now().isoformat(timespec="seconds"),
                 "verified": False,
                 "backup_name": backup_name,
-                "exclude_patterns": normalize_patterns(self.exclude_var.get()),
+                "exclude_patterns": exclude_patterns,
                 "files": source_data["files"],
                 "directories": source_data["directories"],
                 "stats": {
