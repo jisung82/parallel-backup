@@ -585,7 +585,6 @@ class ParallelBackupApp:
             )
 
             status = self.status_var.get()
-            canvas.create_rounded_rectangle if hasattr(canvas, "create_rounded_rectangle") else None
             canvas.create_rectangle(
                 width - 178, 27, width - 26, 61,
                 fill="#FFFFFF", outline=""
@@ -1057,17 +1056,20 @@ class ParallelBackupApp:
         if path and path not in self.destinations:
             self.destinations.append(path)
             self.dest_list.insert("end", path)
+            self._refresh_metrics()
             self.save_profile(silent=True)
 
     def remove_destination(self):
         for index in reversed(self.dest_list.curselection()):
             self.dest_list.delete(index)
             del self.destinations[index]
+        self._refresh_metrics()
         self.save_profile(silent=True)
 
     def clear_destinations(self):
         self.destinations.clear()
         self.dest_list.delete(0, "end")
+        self._refresh_metrics()
         self.save_profile(silent=True)
 
     def save_profile(self, silent=False):
