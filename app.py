@@ -391,6 +391,7 @@ class ParallelBackupApp:
         self.exclude_var = tk.StringVar()
         self.status_var = tk.StringVar(value="대기 중")
         self.elapsed_var = tk.StringVar(value="경과 00:00:00")
+        self.eta_var = tk.StringVar(value="예상 계산 중...")
         self.operation_started_at = None
         self.elapsed_job = None
         self.last_elapsed_seconds = 0
@@ -1258,6 +1259,15 @@ class ParallelBackupApp:
         )
         self.elapsed_label.pack(side="left", padx=(12, 0), anchor="w")
 
+        self.eta_label = tk.Label(
+            status_row,
+            textvariable=self.eta_var,
+            bg="#111827",
+            fg="#CBD5E1",
+            font=(self.font_family, 9, "bold"),
+        )
+        self.eta_label.pack(side="left", padx=(12, 0), anchor="w")
+
         progress_wrap = tk.Frame(status_card, bg="#111827")
         progress_wrap.pack(side="right", fill="x", expand=True, padx=15, pady=14)
         self.progress = ttk.Progressbar(
@@ -1561,7 +1571,8 @@ class ParallelBackupApp:
         self.operation_started_at = time.monotonic()
         self.last_elapsed_seconds = 0
         self.elapsed_var.set("경과 00:00:00")
-        self.elapsed_job = self.root.after(1000, self._update_elapsed)
+        self.eta_var.set("예상 계산 중...")
+        self.elapsed_job = self.root.after(2000, self._update_elapsed)
 
     def _update_elapsed(self):
         if self.operation_started_at is None:
@@ -1572,7 +1583,27 @@ class ParallelBackupApp:
         self.elapsed_var.set(
             f"경과 {self._format_elapsed(self.last_elapsed_seconds)}"
         )
-        self.elapsed_job = self.root.after(1000, self._update_elapsed)
+
+        remaining = max(0, self.progress_total - self.progress_value)
+        if (
+            self.progress_value > 0
+            and self.progress_total > self.progress_value
+            and self.last_elapsed_seconds >= 2
+        ):
+            rate = self.progress_value / self.last_elapsed_seconds
+            if rate > 0:
+                eta_seconds = remaining / rate
+                self.eta_var.set(
+                    f"예상 {self._format_elapsed(eta_seconds)}"
+                )
+            else:
+                self.eta_var.set("예상 계산 중...")
+        elif self.progress_total > 0 and self.progress_value >= self.progress_total:
+            self.eta_var.set("예상 00:00:00")
+        else:
+            self.eta_var.set("예상 계산 중...")
+
+        self.elapsed_job = self.root.after(2000, self._update_elapsed)
 
     def _stop_operation_timer(self):
         if self.elapsed_job is not None:
@@ -1587,10 +1618,14 @@ class ParallelBackupApp:
             self.elapsed_var.set(
                 f"소요 {self._format_elapsed(self.last_elapsed_seconds)}"
             )
+            self.eta_var.set("예상 --:--:--")
             self.operation_started_at = None
 
     def _set_operation(self, status):
-        self.root.after(0, lambda: self.status_var.set(status))
+        def update():
+            self.status_var.set(status)
+            self._refresh_header()
+        self.root.after(0, update)
 
     def _timeline_palette(self):
         precision = self.backup_mode_var.get() == "정밀 검사 백업"
@@ -2062,6 +2097,7 @@ class ParallelBackupApp:
                 if failed == 0:
                     self._set_timeline_stage(6, success=True)
                     self.status_var.set(f"완료 · {success}/{len(results)}개 대상")
+                self._refresh_header()
                     self._refresh_header()
                     messagebox.showinfo(
                         "백업 완료",
