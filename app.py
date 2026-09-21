@@ -913,85 +913,39 @@ class ParallelBackupApp:
             style="Body.TLabel",
         ).pack(anchor="w", pady=(0, 9))
 
-        dest_input_row = tk.Frame(destinations_card, bg=self.colors["surface"])
-        dest_input_row.pack(fill="x", pady=(0, 9))
+        ttk.Label(
+            destinations_card,
+            text="여러 경로를 추가하면 같은 원본을 동시에 백업합니다.",
+            style="Body.TLabel",
+        ).pack(anchor="w", pady=(0, 8))
 
-        self.dest_entry = tk.Entry(
-            dest_input_row,
-            font=(self.font_family, 9),
-            bg=self.colors["surface"],
-            fg=self.colors["text"],
-            insertbackground=self.colors["primary"],
-            relief="solid",
-            bd=1,
-            highlightthickness=1,
-            highlightbackground=self.colors["border"],
-            highlightcolor=self.colors["primary"],
-        )
-        self.dest_entry.pack(side="left", fill="x", expand=True, ipady=7)
-        self.dest_entry.bind("<Return>", lambda _event: self.add_destination_from_entry())
-        self.dest_entry.insert(0, "예: D:\\backup 또는 E:\\backup")
-        self.dest_entry.config(fg=self.colors["muted"])
-        self.dest_entry.bind("<FocusIn>", self._clear_destination_placeholder)
-        self.dest_entry.bind("<FocusOut>", self._restore_destination_placeholder)
+        self.destination_rows = []
 
-        ttk.Button(
-            dest_input_row,
-            text="찾기",
-            command=self.select_destination_for_entry,
-        ).pack(side="left", padx=(7, 0))
-
-        list_holder = tk.Frame(
+        self.dest_rows_holder = tk.Frame(
             destinations_card,
             bg=self.colors["surface"],
-            highlightbackground=self.colors["border"],
-            highlightthickness=1,
         )
-        list_holder.pack(fill="both", expand=True)
+        self.dest_rows_holder.pack(fill="x", expand=False)
 
-        self.dest_list = tk.Listbox(
-            list_holder,
+        dest_add_row = tk.Frame(
+            destinations_card,
             bg=self.colors["surface"],
-            fg=self.colors["text"],
-            selectbackground="#E0E7FF",
-            selectforeground=self.colors["primary_dark"],
-            activestyle="none",
-            bd=0,
-            highlightthickness=0,
-            relief="flat",
-            font=(self.font_family, 9),
         )
-        self.dest_list.pack(side="left", fill="both", expand=True, padx=(7, 0), pady=7)
-
-        scroll = ttk.Scrollbar(
-            list_holder,
-            orient="vertical",
-            command=self.dest_list.yview,
-        )
-        scroll.pack(side="right", fill="y")
-        self.dest_list.configure(yscrollcommand=scroll.set)
-
-        dest_buttons = ttk.Frame(destinations_card, style="Card.TFrame")
-        dest_buttons.pack(fill="x", pady=(9, 0))
+        dest_add_row.pack(fill="x", pady=(9, 0))
 
         ttk.Button(
-            dest_buttons,
-            text="입력 경로 추가",
-            command=self.add_destination_from_entry,
+            dest_add_row,
+            text="+ 백업 대상 추가",
+            command=self.add_destination_row,
             style="Primary.TButton",
         ).pack(side="left")
+
         ttk.Button(
-            dest_buttons,
-            text="선택 삭제",
-            command=self.remove_destination,
-            style="Ghost.TButton",
-        ).pack(side="left", padx=5)
-        ttk.Button(
-            dest_buttons,
+            dest_add_row,
             text="전체 삭제",
             command=self.clear_destinations,
             style="Ghost.TButton",
-        ).pack(side="left")
+        ).pack(side="left", padx=7)
 
         status_card = tk.Frame(
             content,
@@ -1095,55 +1049,109 @@ class ParallelBackupApp:
             self.source_var.set(path)
             self.save_profile(silent=True)
 
-    def _clear_destination_placeholder(self, _event=None):
-        if self.dest_entry.get() == "예: D:\\backup 또는 E:\\backup":
-            self.dest_entry.delete(0, "end")
-            self.dest_entry.config(fg=self.colors["text"])
+    def _sync_destinations(self):
+        destinations = []
+        for row in self.destination_rows:
+            value = row["var"].get().strip().strip('"')
+            if value and value not in destinations:
+                destinations.append(value)
+        self.destinations = destinations
+        self._refresh_metrics()
 
-    def _restore_destination_placeholder(self, _event=None):
-        if not self.dest_entry.get().strip():
-            self.dest_entry.insert(0, "예: D:\\backup 또는 E:\\backup")
-            self.dest_entry.config(fg=self.colors["muted"])
+    def _build_destination_row(self, value=""):
+        row_frame = tk.Frame(
+            self.dest_rows_holder,
+            bg=self.colors["surface"],
+        )
+        row_frame.pack(fill="x", pady=3)
 
-    def add_destination_from_entry(self):
-        self._clear_destination_placeholder()
-        path = self.dest_entry.get().strip().strip('"')
-        if not path:
-            return
-        if path not in self.destinations:
-            self.destinations.append(path)
-            self.dest_list.insert("end", path)
-            self._refresh_metrics()
-            self.save_profile(silent=True)
-        self.dest_entry.delete(0, "end")
-        self._restore_destination_placeholder()
+        number = tk.Label(
+            row_frame,
+            text=f"{len(self.destination_rows) + 1}",
+            bg=self.colors["soft_indigo"],
+            fg=self.colors["primary_dark"],
+            width=3,
+            font=(self.font_family, 9, "bold"),
+        )
+        number.pack(side="left", padx=(0, 7), ipady=5)
 
-    def select_destination_for_entry(self):
+        path_var = tk.StringVar(value=value)
+        entry = tk.Entry(
+            row_frame,
+            textvariable=path_var,
+            font=(self.font_family, 9),
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
+            insertbackground=self.colors["primary"],
+            relief="solid",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
+            highlightcolor=self.colors["primary"],
+        )
+        entry.pack(side="left", fill="x", expand=True, ipady=6)
+
+        ttk.Button(
+            row_frame,
+            text="찾기",
+            command=lambda e=entry, v=path_var: self.select_destination_row(e, v),
+        ).pack(side="left", padx=(7, 5))
+
+        ttk.Button(
+            row_frame,
+            text="×",
+            width=3,
+            command=lambda frame=row_frame: self.remove_destination_row(frame),
+            style="Ghost.TButton",
+        ).pack(side="left")
+
+        row_info = {"frame": row_frame, "var": path_var, "number": number}
+        self.destination_rows.append(row_info)
+        path_var.trace_add("write", lambda *_args: self._sync_destinations())
+        self._renumber_destination_rows()
+
+    def _renumber_destination_rows(self):
+        for index, row in enumerate(self.destination_rows, start=1):
+            row["number"].configure(text=str(index))
+
+    def add_destination_row(self, value=""):
+        self._build_destination_row(value)
+        self._sync_destinations()
+        self.save_profile(silent=True)
+
+    def select_destination_row(self, entry, variable):
         path = filedialog.askdirectory(title="백업 대상 경로 선택")
         if path:
-            self._clear_destination_placeholder()
-            self.dest_entry.delete(0, "end")
-            self.dest_entry.insert(0, path)
-            self.dest_entry.config(fg=self.colors["text"])
+            variable.set(path)
+            entry.focus_set()
 
-    def add_destination(self):
-        self.select_destination_for_entry()
-        self.add_destination_from_entry()
-
-    def remove_destination(self):
-        for index in reversed(self.dest_list.curselection()):
-            self.dest_list.delete(index)
-            del self.destinations[index]
-        self._refresh_metrics()
+    def remove_destination_row(self, frame):
+        self.destination_rows = [
+            row for row in self.destination_rows
+            if row["frame"] is not frame
+        ]
+        frame.destroy()
+        self._renumber_destination_rows()
+        self._sync_destinations()
         self.save_profile(silent=True)
 
     def clear_destinations(self):
+        for row in self.destination_rows:
+            row["frame"].destroy()
+        self.destination_rows.clear()
         self.destinations.clear()
-        self.dest_list.delete(0, "end")
         self._refresh_metrics()
         self.save_profile(silent=True)
 
+    def _load_destination_rows(self, destinations):
+        self.clear_destinations()
+        for path in destinations:
+            if path:
+                self._build_destination_row(path)
+        self._sync_destinations()
+
     def save_profile(self, silent=False):
+        self._sync_destinations()
         profile = {
             "version": 2,
             "source": self.source_var.get().strip(),
@@ -1180,12 +1188,7 @@ class ParallelBackupApp:
         self.keep_var.set(int(profile.get("keep", 10)))
         self.exclude_var.set(profile.get("exclude", ""))
 
-        self.destinations = []
-        self.dest_list.delete(0, "end")
-        for item in profile.get("destinations", []):
-            if item:
-                self.destinations.append(item)
-                self.dest_list.insert("end", item)
+        self._load_destination_rows(profile.get("destinations", []))
 
     def write_log(self, message):
         def update():
@@ -1220,6 +1223,7 @@ class ParallelBackupApp:
             self.write_log("[CANCEL] 취소 요청됨")
 
     def validate(self):
+        self._sync_destinations()
         source = Path(self.source_var.get().strip())
         name = self.name_var.get().strip()
 
