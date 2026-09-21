@@ -6,6 +6,7 @@ import shutil
 import threading
 import time
 import uuid
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -14,7 +15,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
 APP_TITLE = "Parallel Backup"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
@@ -61,6 +62,56 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def create_zip_archive(snapshot: Path, archive_path: Path, progress_callback, cancel_event):
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(
+        archive_path,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=6,
+    ) as archive:
+        files = [
+            path for path in snapshot.rglob("*")
+            if path.is_file()
+        ]
+        for path in files:
+            if cancel_event.is_set():
+                raise RuntimeError("ZIP 생성이 취소되었습니다.")
+            archive.write(path, path.relative_to(snapshot).as_posix())
+            progress_callback()
+
+
+def verify_zip_archive(archive_path: Path, manifest: dict, progress_callback, cancel_event):
+    with zipfile.ZipFile(archive_path, mode="r") as archive:
+        bad_member = archive.testzip()
+        if bad_member is not None:
+            raise IOError(f"ZIP CRC 검증 실패: {bad_member}")
+
+        for rel, info in manifest["files"].items():
+            if cancel_event.is_set():
+                raise RuntimeError("ZIP 검증이 취소되었습니다.")
+            try:
+                with archive.open(rel, "r") as handle:
+                    digest = hashlib.sha256()
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                    actual = digest.hexdigest()
+            except KeyError:
+                raise FileNotFoundError(f"ZIP에 파일 없음: {rel}")
+
+            if actual != info["sha256"]:
+                raise IOError(
+                    f"ZIP SHA-256 불일치: {rel} "
+                    f"(expected={info['sha256']}, actual={actual})"
+                )
+            progress_callback()
+
+    manifest_member = MANIFEST_DIR + "/" + MANIFEST_FILE
+    with zipfile.ZipFile(archive_path, mode="r") as archive:
+        if manifest_member not in archive.namelist():
+            raise FileNotFoundError("ZIP 내부 manifest.json이 없습니다.")
 
 
 def normalize_patterns(raw: str):
@@ -223,7 +274,10 @@ def find_latest_verified_backup(destination: Path, prefix: str, source: Path):
 def make_unique_backup_name(destination: Path, desired: str):
     candidate = desired
     counter = 1
-    while (destination / candidate).exists():
+    while (
+        (destination / candidate).exists()
+        or (destination / f"{candidate}.zip").exists()
+    ):
         candidate = f"{desired}_{counter:02d}"
         counter += 1
     return candidate
@@ -1426,7 +1480,11 @@ class ParallelBackupApp:
 
             expected_ops = max(
                 1,
-                (file_count * (2 if verify else 1))
+                (
+                    file_count * (2 if verify else 1)
+                    + file_count * 2
+                    + 1
+                )
                 * len(destinations),
             )
             self.set_progress(
@@ -1645,6 +1703,30 @@ class ParallelBackupApp:
 
             os.replace(partial_target, final_target)
 
+            archive_target = destination / f"{backup_name}.zip"
+            partial_archive = destination / f".parallel-backup.partial-{uuid.uuid4().hex}.zip"
+
+            self.write_log(f"[ZIP] 생성 시작: {archive_target.name}")
+            create_zip_archive(
+                final_target,
+                partial_archive,
+                self.advance_progress,
+                self.cancel_event,
+            )
+
+            self.write_log(f"[ZIP VERIFY] {archive_target.name}")
+            verify_zip_archive(
+                partial_archive,
+                manifest,
+                self.advance_progress,
+                self.cancel_event,
+            )
+
+            if self.cancel_event.is_set():
+                raise RuntimeError("ZIP 생성이 취소되었습니다.")
+
+            os.replace(partial_archive, archive_target)
+
             snapshots = list_verified_snapshots(
                 destination,
                 f"{requested_name}_",
@@ -1653,21 +1735,39 @@ class ParallelBackupApp:
             for old_snapshot, _ in snapshots[keep:]:
                 try:
                     safe_remove_snapshot(old_snapshot)
-                    self.write_log(f"[RETENTION] 삭제: {old_snapshot.name}")
+                    old_archive = old_snapshot.with_name(f"{old_snapshot.name}.zip")
+                    if old_archive.exists():
+                        old_archive.unlink()
+                    self.write_log(
+                        f"[RETENTION] 삭제: {old_snapshot.name} + {old_archive.name}"
+                    )
                 except OSError as exc:
                     self.write_log(
                         f"[RETENTION FAIL] {old_snapshot.name} -> {exc}"
                     )
 
             self.write_log(
+                f"[ZIP OK] {archive_target.name}"
+            )
+            self.write_log(
                 f"[OK] {destination} -> {backup_name} "
                 f"(copied={copied:,}, reused={reused:,})"
             )
-            return {"ok": True, "destination": str(destination), "snapshot": str(final_target)}
+            return {
+                "ok": True,
+                "destination": str(destination),
+                "snapshot": str(final_target),
+                "archive": str(archive_target),
+            }
 
         except Exception as exc:
             if partial_target.exists():
                 shutil.rmtree(partial_target, ignore_errors=True)
+            for partial_archive in destination.glob(".parallel-backup.partial-*.zip"):
+                try:
+                    partial_archive.unlink()
+                except OSError:
+                    pass
             self.write_log(f"[FAIL] {destination} -> {exc}")
             return {"ok": False, "destination": str(destination), "error": str(exc)}
 
