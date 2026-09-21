@@ -404,6 +404,8 @@ class ParallelBackupApp:
             "primary": "#4F46E5",
             "primary_dark": "#3730A3",
             "secondary": "#7C3AED",
+            "danger": "#DC2626",
+            "danger_dark": "#B91C1C",
             "text": "#0F172A",
             "muted": "#64748B",
             "success": "#10B981",
@@ -1041,7 +1043,7 @@ class ParallelBackupApp:
 
         self.cancel_button = ttk.Button(
             action_row,
-            text="취소",
+            text="정지",
             command=self.cancel_backup,
             style="Danger.TButton",
             state="disabled",
@@ -1220,18 +1222,36 @@ class ParallelBackupApp:
         active = self.backup_mode_var.get()
         for mode, button in self.mode_buttons.items():
             if mode == active:
+                selected_color = (
+                    self.colors["danger"]
+                    if mode == "정밀 검사 백업"
+                    else self.colors["primary"]
+                )
+                selected_active = (
+                    self.colors["danger_dark"]
+                    if mode == "정밀 검사 백업"
+                    else self.colors["primary_dark"]
+                )
                 button.configure(
-                    bg=self.colors["primary"],
+                    bg=selected_color,
                     fg="#FFFFFF",
-                    activebackground=self.colors["primary_dark"],
+                    activebackground=selected_active,
                     activeforeground="#FFFFFF",
                 )
             else:
                 button.configure(
                     bg=self.colors["surface"],
                     fg=self.colors["muted"],
-                    activebackground=self.colors["soft_indigo"],
-                    activeforeground=self.colors["primary_dark"],
+                    activebackground=(
+                        "#FEF2F2"
+                        if mode == "정밀 검사 백업"
+                        else self.colors["soft_indigo"]
+                    ),
+                    activeforeground=(
+                        self.colors["danger_dark"]
+                        if mode == "정밀 검사 백업"
+                        else self.colors["primary_dark"]
+                    ),
                 )
 
     def _refresh_metrics(self):
