@@ -15,7 +15,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
 APP_TITLE = "Parallel Backup"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
@@ -385,6 +385,7 @@ class ParallelBackupApp:
         self.name_var = tk.StringVar(value="backup")
         self.incremental_var = tk.BooleanVar(value=True)
         self.backup_mode_var = tk.StringVar(value="일반 백업")
+        self.app_mode_var = tk.StringVar(value="일반 백업")
         self.hardlink_var = tk.BooleanVar(value=True)
         self.parallel_var = tk.IntVar(value=3)
         self.keep_var = tk.IntVar(value=10)
@@ -395,6 +396,21 @@ class ParallelBackupApp:
         self.operation_started_at = None
         self.elapsed_job = None
         self.last_elapsed_seconds = 0
+
+        self.compare_source_var = tk.StringVar()
+        self.compare_target_var = tk.StringVar()
+        self.compare_size_var = tk.BooleanVar(value=True)
+        self.compare_mtime_var = tk.BooleanVar(value=True)
+        self.compare_sha_var = tk.BooleanVar(value=False)
+        self.compare_status_var = tk.StringVar(value="대기 중")
+        self.compare_elapsed_var = tk.StringVar(value="경과 00:00:00")
+        self.compare_eta_var = tk.StringVar(value="예상 계산 중...")
+        self.compare_started_at = None
+        self.compare_timer_job = None
+        self.compare_progress_value = 0
+        self.compare_progress_total = 1
+        self.compare_results = []
+        self.compare_summary = {"same": 0, "different": 0, "left_only": 0, "right_only": 0}
 
         self.timeline_steps = [
             ("원본 분석", "scan"),
@@ -658,75 +674,15 @@ class ParallelBackupApp:
         )
         canvas.pack(fill="x")
 
-        self.header_mode_frame = tk.Frame(
-            canvas,
-            bg=self.colors["surface"],
-            highlightthickness=0,
-            bd=0,
-        )
-
-        status_frame = tk.Frame(
-            self.header_mode_frame,
-            bg=self.colors["surface"],
-            highlightthickness=0,
-            bd=0,
-        )
-        status_frame.pack(fill="x")
-
-        self.header_status_label = tk.Label(
-            status_frame,
-            textvariable=self.status_var,
-            bg=self.colors["surface"],
-            fg=self.colors["primary_dark"],
-            font=(self.font_family, 9, "bold"),
-            width=19,
-            height=1,
-            pady=7,
-        )
-        self.header_status_label.pack(fill="x")
-
-        segment_shell = tk.Frame(
-            self.header_mode_frame,
-            bg=self.colors["border"],
-            highlightthickness=0,
-            bd=0,
-        )
-        segment_shell.pack(fill="x", pady=(4, 0), ipady=1)
-
-        self.header_mode_buttons = {}
-        for mode_key, label in [
-            ("일반 백업", "일반"),
-            ("정밀 검사 백업", "정밀 검사"),
-        ]:
-            button = tk.Button(
-                segment_shell,
-                text=label,
-                command=lambda value=mode_key: self.set_backup_mode(value),
-                relief="flat",
-                bd=0,
-                highlightthickness=0,
-                cursor="hand2",
-                font=(self.font_family, 8, "bold"),
-                padx=10,
-                pady=4,
-            )
-            button.pack(side="left", fill="x", expand=True)
-            self.header_mode_buttons[mode_key] = button
-
-        self.header_mode_window = canvas.create_window(
-            0, 0,
-            window=self.header_mode_frame,
-            anchor="nw",
-            width=152,
-        )
-
         def draw(event=None):
             width = canvas.winfo_width()
             height = canvas.winfo_height()
-            canvas.delete("background")
+            canvas.delete("all")
 
             precision = self.backup_mode_var.get() == "정밀 검사 백업"
-            if precision:
+            compare = self.app_mode_var.get() == "파일 비교"
+
+            if precision and not compare:
                 left = (220, 38, 38)
                 right = (239, 68, 68)
                 blob_right = "#F87171"
@@ -744,28 +700,25 @@ class ParallelBackupApp:
                 status_fg = self.colors["primary_dark"]
 
             steps = max(2, width)
-            r1, g1, b1 = left
-            r2, g2, b2 = right
             for x in range(steps):
                 t = x / max(1, steps - 1)
                 color = "#{:02X}{:02X}{:02X}".format(
-                    int(r1 + (r2 - r1) * t),
-                    int(g1 + (g2 - g1) * t),
-                    int(b1 + (b2 - b1) * t),
+                    int(left[0] + (right[0] - left[0]) * t),
+                    int(left[1] + (right[1] - left[1]) * t),
+                    int(left[2] + (right[2] - left[2]) * t),
                 )
                 canvas.create_rectangle(
                     x, 0, x + 2, height,
                     fill=color, outline=color,
-                    tags="background",
                 )
 
             canvas.create_oval(
                 width - 210, -90, width + 60, 180,
-                fill=blob_right, outline="", tags="background"
+                fill=blob_right, outline=""
             )
             canvas.create_oval(
                 -80, 72, 120, 272,
-                fill=blob_left, outline="", tags="background"
+                fill=blob_left, outline=""
             )
 
             canvas.create_text(
@@ -774,15 +727,25 @@ class ParallelBackupApp:
                 text="Parallel Backup",
                 fill="#FFFFFF",
                 font=(self.font_family, 24, "bold"),
-                tags="background",
             )
             canvas.create_text(
                 31, 67,
                 anchor="nw",
-                text="안전한 병렬 백업 · 증분 스냅샷 · SHA-256 검증",
+                text="안전한 병렬 백업 · 중복 스냅샷 · SHA-256 검증",
                 fill=subtitle,
                 font=(self.font_family, 10),
-                tags="background",
+            )
+
+            status_text = self.compare_status_var.get() if compare else self.status_var.get()
+            canvas.create_rectangle(
+                width - 180, 27, width - 26, 61,
+                fill="#FFFFFF", outline=""
+            )
+            canvas.create_text(
+                width - 103, 44,
+                text=status_text,
+                fill=status_fg,
+                font=(self.font_family, 9, "bold"),
             )
             canvas.create_text(
                 width - 30, 113,
@@ -790,56 +753,17 @@ class ParallelBackupApp:
                 text=f"v{APP_VERSION}",
                 fill=version,
                 font=(self.font_family, 8, "bold"),
-                tags="background",
             )
-
-            canvas.coords(
-                self.header_mode_window,
-                width - 190,
-                20,
-            )
-            self.header_mode_frame.configure(
-                bg=self.colors["surface"],
-            )
-            self.header_status_label.configure(
-                fg=status_fg,
-            )
-            self._refresh_header_segment_colors()
 
         canvas.bind("<Configure>", draw)
         self.header_canvas = canvas
         self._draw_header = draw
         return canvas
 
-    def _refresh_header_segment_colors(self):
-        if not hasattr(self, "header_mode_buttons"):
-            return
-
-        active = self.backup_mode_var.get()
-        precision = active == "정밀 검사 백업"
-        selected = self.colors["danger"] if precision else self.colors["primary"]
-        selected_active = self.colors["danger_dark"] if precision else self.colors["primary_dark"]
-        selected_text = "#FFFFFF"
-
-        for mode, button in self.header_mode_buttons.items():
-            if mode == active:
-                button.configure(
-                    bg=selected,
-                    fg=selected_text,
-                    activebackground=selected_active,
-                    activeforeground=selected_text,
-                )
-            else:
-                button.configure(
-                    bg=self.colors["surface"],
-                    fg=self.colors["muted"],
-                    activebackground="#FEF2F2" if precision else self.colors["soft_indigo"],
-                    activeforeground=self.colors["danger_dark"] if precision else self.colors["primary_dark"],
-                )
-
     def _refresh_header(self):
         if hasattr(self, "_draw_header"):
             self._draw_header()
+
     def _metric_card(self, parent, title, value_var, accent):
         wrapper, card = self._card(parent, padding=13)
         ttk.Label(
@@ -891,33 +815,88 @@ class ParallelBackupApp:
         self.scrollbar.pack(side="right", fill="y")
         self.scroll_canvas.configure(yscrollcommand=self.scrollbar.set)
 
-        content = tk.Frame(
-            self.scroll_canvas,
-            bg=self.colors["bg"],
-        )
+        content = tk.Frame(self.scroll_canvas, bg=self.colors["bg"])
         self.scroll_window = self.scroll_canvas.create_window(
-            (0, 0),
-            window=content,
-            anchor="nw",
+            (0, 0), window=content, anchor="nw"
         )
 
         def update_scroll_region(_event=None):
-            self.scroll_canvas.configure(
-                scrollregion=self.scroll_canvas.bbox("all")
-            )
+            self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
         def resize_content(event):
-            self.scroll_canvas.itemconfigure(
-                self.scroll_window,
-                width=event.width,
-            )
+            self.scroll_canvas.itemconfigure(self.scroll_window, width=event.width)
 
         content.bind("<Configure>", update_scroll_region)
         self.scroll_canvas.bind("<Configure>", resize_content)
-
         self.root.bind_all("<MouseWheel>", self._on_mousewheel)
 
-        top = ttk.Frame(content)
+        mode_row = tk.Frame(content, bg=self.colors["bg"])
+        mode_row.pack(fill="x", padx=14, pady=(12, 10))
+        self.mode_cards = {}
+
+        for key, title, desc, icon, color in [
+            ("일반 백업", "일반 백업", "빠르고 안정적인 백업", "▣", self.colors["primary"]),
+            ("정밀 검사 백업", "정밀 검사 백업", "SHA-256으로 더 꼼꼼하게 검증", "✓", self.colors["danger"]),
+            ("파일 비교", "파일 비교", "두 폴더의 차이를 빠르게 확인", "↔", "#0F9D96"),
+        ]:
+            card = tk.Frame(
+                mode_row,
+                bg=self.colors["surface"],
+                highlightbackground=self.colors["border"],
+                highlightthickness=1,
+                cursor="hand2",
+            )
+            card.pack(side="left", fill="both", expand=True, padx=4)
+            icon_circle = tk.Label(
+                card,
+                text=icon,
+                bg=color,
+                fg="#FFFFFF",
+                font=(self.font_family, 16, "bold"),
+                width=3,
+                height=1,
+            )
+            icon_circle.pack(side="left", padx=12, pady=12)
+            text_frame = tk.Frame(card, bg=self.colors["surface"])
+            text_frame.pack(side="left", fill="x", expand=True, pady=10)
+            title_label = tk.Label(
+                text_frame,
+                text=title,
+                bg=self.colors["surface"],
+                fg=color if key != "일반 백업" else self.colors["primary"],
+                font=(self.font_family, 11, "bold"),
+            )
+            title_label.pack(anchor="w")
+            desc_label = tk.Label(
+                text_frame,
+                text=desc,
+                bg=self.colors["surface"],
+                fg=self.colors["muted"],
+                font=(self.font_family, 8),
+            )
+            desc_label.pack(anchor="w", pady=(2, 0))
+            self.mode_cards[key] = {
+                "frame": card,
+                "icon": icon_circle,
+                "title": title_label,
+                "text": desc_label,
+                "color": color,
+            }
+            for widget in (card, icon_circle, text_frame, title_label, desc_label):
+                widget.bind("<Button-1>", lambda _e, value=key: self.set_app_mode(value))
+
+        self.mode_content = tk.Frame(content, bg=self.colors["bg"])
+        self.mode_content.pack(fill="both", expand=True)
+
+        self.backup_view = tk.Frame(self.mode_content, bg=self.colors["bg"])
+        self.compare_view = tk.Frame(self.mode_content, bg=self.colors["bg"])
+
+        self._build_backup_view()
+        self._build_compare_view()
+        self.set_app_mode(self.app_mode_var.get())
+
+    def _build_backup_view(self):
+        top = ttk.Frame(self.backup_view)
         top.pack(fill="x", pady=(0, 12))
 
         intro = ttk.Frame(top)
@@ -951,7 +930,7 @@ class ParallelBackupApp:
             metrics, "Workers", self.metric_parallel, self.colors["success"]
         ).pack(side="left")
 
-        grid = ttk.Frame(content)
+        grid = ttk.Frame(self.backup_view)
         grid.pack(fill="both", expand=True)
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
@@ -1219,7 +1198,7 @@ class ParallelBackupApp:
         ).pack(side="left", padx=7)
 
         status_card = tk.Frame(
-            content,
+            self.backup_view,
             bg="#111827",
             highlightthickness=0,
         )
@@ -1278,7 +1257,7 @@ class ParallelBackupApp:
         )
         self.progress.pack(fill="x")
 
-        timeline_wrapper, timeline_card = self._card(content, padding=12)
+        timeline_wrapper, timeline_card = self._card(self.backup_view, padding=12)
         timeline_wrapper.pack(fill="x", pady=(0, 9))
         self.timeline_canvas = tk.Canvas(
             timeline_card,
@@ -1291,7 +1270,7 @@ class ParallelBackupApp:
         self.timeline_canvas.bind("<Configure>", self._draw_timeline)
         self.root.after_idle(self._draw_timeline)
 
-        log_wrapper, log_card = self._card(content, padding=13)
+        log_wrapper, log_card = self._card(self.backup_view, padding=13)
         log_wrapper.pack(fill="both", expand=True)
         ttk.Label(
             log_card,
@@ -1333,6 +1312,529 @@ class ParallelBackupApp:
 
         self._refresh_metrics()
 
+
+
+    def _build_compare_view(self):
+        view = self.compare_view
+
+        title_row = tk.Frame(view, bg=self.colors["bg"])
+        title_row.pack(fill="x", pady=(2, 10))
+        tk.Label(
+            title_row,
+            text="파일 비교",
+            bg=self.colors["bg"],
+            fg=self.colors["text"],
+            font=(self.font_family, 18, "bold"),
+        ).pack(side="left")
+        tk.Label(
+            title_row,
+            text="두 폴더/드라이브의 파일 차이를 빠르고 정확하게 비교합니다.",
+            bg=self.colors["bg"],
+            fg=self.colors["muted"],
+            font=(self.font_family, 9),
+        ).pack(side="left", padx=(10, 0), pady=(5, 0))
+
+        compare_card = tk.Frame(
+            view, bg=self.colors["surface"],
+            highlightbackground=self.colors["border"], highlightthickness=1
+        )
+        compare_card.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            compare_card, text="비교 대상 1 (원본)",
+            bg=self.colors["surface"], fg=self.colors["text"],
+            font=(self.font_family, 10, "bold")
+        ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 6))
+        tk.Label(
+            compare_card, text="비교 대상 2 (비교할 폴더)",
+            bg=self.colors["surface"], fg=self.colors["text"],
+            font=(self.font_family, 10, "bold")
+        ).grid(row=0, column=1, sticky="w", padx=16, pady=(14, 6))
+
+        self._make_compare_path_row(
+            compare_card, 1, self.compare_source_var, "원본 폴더 선택", 0
+        )
+        self._make_compare_path_row(
+            compare_card, 1, self.compare_target_var, "비교 폴더 선택", 1
+        )
+
+        swap_button = ttk.Button(
+            compare_card, text="↔", command=self.swap_compare_paths,
+            style="Ghost.TButton"
+        )
+        swap_button.grid(row=1, column=2, padx=5, sticky="s")
+        compare_card.columnconfigure(0, weight=1)
+        compare_card.columnconfigure(1, weight=1)
+
+        settings = tk.Frame(
+            view, bg=self.colors["surface"],
+            highlightbackground=self.colors["border"], highlightthickness=1
+        )
+        settings.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            settings, text="비교 설정",
+            bg=self.colors["surface"], fg=self.colors["secondary"],
+            font=(self.font_family, 9, "bold")
+        ).pack(anchor="w", padx=16, pady=(12, 4))
+        setting_row = tk.Frame(settings, bg=self.colors["surface"])
+        setting_row.pack(fill="x", padx=16, pady=(0, 10))
+        ttk.Checkbutton(setting_row, text="파일 크기", variable=self.compare_size_var).pack(side="left", padx=(0, 14))
+        ttk.Checkbutton(setting_row, text="수정 시간", variable=self.compare_mtime_var).pack(side="left", padx=(0, 14))
+        ttk.Checkbutton(setting_row, text="SHA-256 정밀 비교", variable=self.compare_sha_var).pack(side="left")
+
+        compare_actions = tk.Frame(settings, bg=self.colors["surface"])
+        compare_actions.pack(fill="x", padx=16, pady=(0, 14))
+        self.compare_button = ttk.Button(
+            compare_actions, text="  비교 시작", command=self.start_compare,
+            style="Primary.TButton"
+        )
+        self.compare_button.pack(side="left")
+        ttk.Button(
+            compare_actions, text="초기화", command=self.reset_compare,
+            style="Ghost.TButton"
+        ).pack(side="left", padx=7)
+
+        info = tk.Label(
+            settings,
+            text="파일 크기 + 수정 시간을 기본으로 비교하고, SHA-256을 켜면 내용까지 검사합니다.",
+            bg="#EEF2FF", fg=self.colors["primary_dark"],
+            font=(self.font_family, 8),
+            anchor="w", padx=12, pady=8
+        )
+        info.pack(fill="x", padx=16, pady=(0, 14))
+
+        status_card = tk.Frame(view, bg="#111827", highlightthickness=0)
+        status_card.pack(fill="x", pady=(0, 10))
+        status_left = tk.Frame(status_card, bg="#111827")
+        status_left.pack(side="left", fill="x", expand=True, padx=15, pady=11)
+        tk.Label(
+            status_left, text="COMPARE STATUS",
+            bg="#111827", fg="#67E8F9",
+            font=(self.font_family, 8, "bold")
+        ).pack(anchor="w")
+        compare_row = tk.Frame(status_left, bg="#111827")
+        compare_row.pack(fill="x", pady=(2,0))
+        self.compare_status_label = tk.Label(
+            compare_row, textvariable=self.compare_status_var,
+            bg="#111827", fg="#FFFFFF",
+            font=(self.font_family, 11, "bold")
+        )
+        self.compare_status_label.pack(side="left")
+        tk.Label(
+            compare_row, textvariable=self.compare_elapsed_var,
+            bg="#111827", fg="#CBD5E1",
+            font=(self.font_family, 9, "bold")
+        ).pack(side="left", padx=(12,0))
+        self.compare_eta_label = tk.Label(
+            compare_row, textvariable=self.compare_eta_var,
+            bg="#111827", fg="#CBD5E1",
+            font=(self.font_family, 9, "bold")
+        )
+        self.compare_eta_label.pack(side="left", padx=(12,0))
+        compare_progress_wrap = tk.Frame(status_card, bg="#111827")
+        compare_progress_wrap.pack(side="right", fill="x", expand=True, padx=15, pady=14)
+        self.compare_progress = ttk.Progressbar(
+            compare_progress_wrap, mode="determinate",
+            maximum=1, style="Horizontal.TProgressbar"
+        )
+        self.compare_progress.pack(fill="x")
+
+        timeline_card = tk.Frame(
+            view, bg=self.colors["surface"],
+            highlightbackground=self.colors["border"], highlightthickness=1
+        )
+        timeline_card.pack(fill="x", pady=(0,10))
+        self.compare_timeline_canvas = tk.Canvas(
+            timeline_card, height=115, bg=self.colors["surface"],
+            highlightthickness=0, bd=0
+        )
+        self.compare_timeline_canvas.pack(fill="x", padx=8, pady=8)
+        self.compare_timeline_canvas.bind("<Configure>", self._draw_compare_timeline)
+        self._set_compare_timeline(0, reset=True)
+
+        result_wrap = tk.Frame(view, bg=self.colors["bg"])
+        result_wrap.pack(fill="both", expand=True)
+        summary_card = tk.Frame(
+            result_wrap, bg=self.colors["surface"],
+            highlightbackground=self.colors["border"], highlightthickness=1
+        )
+        summary_card.pack(side="left", fill="both", expand=True, padx=(0,6))
+        tk.Label(summary_card, text="비교 결과", bg=self.colors["surface"],
+                 fg=self.colors["primary"], font=(self.font_family,9,"bold")).pack(anchor="w", padx=12, pady=(12,4))
+        self.compare_summary_labels = {}
+        summary_row = tk.Frame(summary_card, bg=self.colors["surface"])
+        summary_row.pack(fill="x", padx=10)
+        for key, label, color in [
+            ("same","일치",self.colors["success"]),
+            ("different","다른 파일",self.colors["danger"]),
+            ("left_only","원본만", "#D97706"),
+            ("right_only","비교 대상만", self.colors["secondary"]),
+        ]:
+            card=tk.Frame(summary_row,bg="#F8FAFC",highlightbackground=self.colors["border"],highlightthickness=1)
+            card.pack(side="left",fill="both",expand=True,padx=3)
+            tk.Label(card,text=label,bg="#F8FAFC",fg=self.colors["muted"],font=(self.font_family,8,"bold")).pack(pady=(8,0))
+            var=tk.StringVar(value="0")
+            self.compare_summary_labels[key]=var
+            tk.Label(card,textvariable=var,bg="#F8FAFC",fg=color,font=(self.font_family,15,"bold")).pack(pady=(1,8))
+        self.compare_result_info = tk.Label(summary_card,text="비교 결과가 여기에 표시됩니다.",
+                                            bg=self.colors["surface"],fg=self.colors["muted"],
+                                            font=(self.font_family,8),anchor="w")
+        self.compare_result_info.pack(fill="x",padx=12,pady=10)
+
+        table_card = tk.Frame(
+            result_wrap,bg=self.colors["surface"],
+            highlightbackground=self.colors["border"],highlightthickness=1
+        )
+        table_card.pack(side="left",fill="both",expand=True,padx=(6,0))
+        tk.Label(table_card,text="변경된 파일",bg=self.colors["surface"],fg=self.colors["primary"],
+                 font=(self.font_family,9,"bold")).pack(anchor="w",padx=12,pady=(12,5))
+        table_holder=tk.Frame(table_card,bg=self.colors["surface"])
+        table_holder.pack(fill="both",expand=True,padx=10,pady=(0,10))
+        columns=("status","path","left_size","right_size")
+        self.compare_tree=ttk.Treeview(table_holder,columns=columns,show="headings",height=10)
+        headings={"status":"상태","path":"경로","left_size":"원본","right_size":"비교 대상"}
+        widths={"status":90,"path":360,"left_size":90,"right_size":90}
+        for col in columns:
+            self.compare_tree.heading(col,text=headings[col])
+            self.compare_tree.column(col,width=widths[col],anchor="w")
+        tree_scroll=ttk.Scrollbar(table_holder,orient="vertical",command=self.compare_tree.yview)
+        self.compare_tree.configure(yscrollcommand=tree_scroll.set)
+        self.compare_tree.pack(side="left",fill="both",expand=True)
+        tree_scroll.pack(side="right",fill="y")
+
+        log_card=tk.Frame(view,bg=self.colors["surface"],highlightbackground=self.colors["border"],highlightthickness=1)
+        log_card.pack(fill="both",expand=True,pady=(10,0))
+        tk.Label(log_card,text="활동 로그",bg=self.colors["surface"],fg=self.colors["primary"],
+                 font=(self.font_family,9,"bold")).pack(anchor="w",padx=12,pady=(10,4))
+        self.compare_log=tk.Text(log_card,height=7,state="disabled",wrap="word",
+                                 bg="#FAFBFF",fg="#334155",relief="flat",bd=0,
+                                 font=("Consolas",8),padx=10,pady=7)
+        self.compare_log.pack(fill="both",expand=True,padx=10,pady=(0,10))
+
+    def _make_compare_path_row(self, parent, row, variable, title, column):
+        holder=tk.Frame(parent,bg=self.colors["surface"])
+        holder.grid(row=row,column=column,sticky="ew",padx=16,pady=(0,14))
+        entry=tk.Entry(holder,textvariable=variable,font=(self.font_family,10),
+                        relief="solid",bd=1,highlightthickness=1,
+                        highlightbackground=self.colors["border"],
+                        highlightcolor=self.colors["primary"],
+                        bg=self.colors["surface"],fg=self.colors["text"],
+                        insertbackground=self.colors["primary"])
+        entry.pack(side="left",fill="x",expand=True,ipady=7)
+        ttk.Button(holder,text="찾기",command=lambda v=variable,t=title:self.select_compare_path(v,t)).pack(side="left",padx=(8,0))
+
+    def select_compare_path(self, variable, title):
+        path=filedialog.askdirectory(title=title)
+        if path:
+            variable.set(path)
+
+    def swap_compare_paths(self):
+        left=self.compare_source_var.get()
+        self.compare_source_var.set(self.compare_target_var.get())
+        self.compare_target_var.set(left)
+
+    def reset_compare(self):
+        self.compare_source_var.set("")
+        self.compare_target_var.set("")
+        self.compare_summary={"same":0,"different":0,"left_only":0,"right_only":0}
+        self.compare_results=[]
+        for var in self.compare_summary_labels.values():
+            var.set("0")
+        for item in self.compare_tree.get_children():
+            self.compare_tree.delete(item)
+        self.compare_result_info.configure(text="비교 결과가 여기에 표시됩니다.")
+        self.compare_status_var.set("대기 중")
+        self.compare_elapsed_var.set("경과 00:00:00")
+        self.compare_eta_var.set("예상 계산 중...")
+        self._set_compare_timeline(0,reset=True)
+        self._refresh_header()
+
+    def _compare_log(self, message):
+        def update():
+            self.compare_log.configure(state="normal")
+            self.compare_log.insert("end", message + "\n")
+            self.compare_log.see("end")
+            self.compare_log.configure(state="disabled")
+        self.root.after(0, update)
+
+    def _format_size(self, size):
+        value=float(size)
+        units=("B","KB","MB","GB","TB")
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                return f"{value:.1f} {unit}"
+            value /= 1024
+        return f"{value:.1f} TB"
+
+    def _scan_compare_folder(self, root):
+        files={}
+        for base, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".parallel-backup.partial-")]
+            base_path=Path(base)
+            for filename in filenames:
+                path=base_path / filename
+                rel=path.relative_to(root).as_posix()
+                try:
+                    stat=path.stat()
+                except OSError:
+                    continue
+                files[rel]={
+                    "size":stat.st_size,
+                    "mtime_ns":stat.st_mtime_ns,
+                }
+        return files
+
+    def _compare_file_maps(self, left_root, right_root, left_files, right_files, use_size, use_mtime, use_sha):
+        results=[]
+        all_paths=sorted(set(left_files)|set(right_files))
+        for rel in all_paths:
+            left=left_files.get(rel)
+            right=right_files.get(rel)
+            if left is None:
+                results.append(("추가",rel,None,right["size"]))
+                continue
+            if right is None:
+                results.append(("누락",rel,left["size"],None))
+                continue
+            same=True
+            if use_size and left["size"] != right["size"]:
+                same=False
+            if use_mtime and left["mtime_ns"] != right["mtime_ns"]:
+                same=False
+            if use_sha and same:
+                same = sha256_file(left_root/Path(rel)) == sha256_file(right_root/Path(rel))
+            elif use_sha and not same:
+                same = sha256_file(left_root/Path(rel)) == sha256_file(right_root/Path(rel))
+            if same:
+                results.append(("일치",rel,left["size"],right["size"]))
+            else:
+                results.append(("다름",rel,left["size"],right["size"]))
+        return results
+
+    def _set_compare_timeline(self, stage, reset=False, error=False, success=False):
+        steps=[
+            ("원본 스캔","folder"),
+            ("백업 스캔","folder"),
+            ("파일 비교","compare"),
+            ("변경 분석","list"),
+            ("결과 정리","refresh"),
+            ("보고서","report"),
+            ("완료","flag"),
+        ]
+        self.compare_timeline_state=(stage,error,success,reset)
+        def draw():
+            canvas=self.compare_timeline_canvas
+            canvas.delete("all")
+            width=max(700,canvas.winfo_width())
+            left=55
+            right=width-55
+            y=35
+            gap=(right-left)/max(1,len(steps)-1)
+            for i in range(len(steps)-1):
+                color="#0F9D96" if success or i<stage else "#CBD5E1"
+                canvas.create_line(left+gap*i+22,y,right if i==len(steps)-2 else left+gap*(i+1)-22,y,fill=color,width=3)
+            for i,(label,icon) in enumerate(steps):
+                x=left+gap*i
+                active=i==stage and not success and not error
+                done=success or i<stage
+                err=error and i==stage
+                fill="#EF4444" if err else ("#0F9D96" if done else ("#4F46E5" if active else "#F8FAFC"))
+                outline=fill if fill!="#F8FAFC" else "#CBD5E1"
+                canvas.create_oval(x-21,y-21,x+21,y+21,fill=fill,outline=outline,width=2)
+                canvas.create_text(x,y,text="✓" if done else ("×" if err else ("⌕" if icon=="compare" else "●")),
+                                  fill="#FFFFFF" if fill!="#F8FAFC" else "#94A3B8",
+                                  font=(self.font_family,10,"bold"))
+                canvas.create_text(x,72,text=f"{i+1}. {label}",fill="#0F172A" if done or active else "#64748B",
+                                  font=(self.font_family,8,"bold"))
+                canvas.create_text(x,93,text="완료" if done else ("오류" if err else ("진행 중..." if active else "대기 중")),
+                                  fill="#0F9D96" if done else ("#EF4444" if err else ("#4F46E5" if active else "#94A3B8")),
+                                  font=(self.font_family,8))
+        self.root.after(0,draw)
+
+    def _start_compare_timer(self):
+        self._stop_compare_timer()
+        self.compare_started_at=time.monotonic()
+        self.compare_elapsed_var.set("경과 00:00:00")
+        self.compare_eta_var.set("예상 계산 중...")
+        self.compare_timer_job=self.root.after(2000,self._update_compare_timer)
+
+    def _update_compare_timer(self):
+        if self.compare_started_at is None:
+            self.compare_timer_job=None
+            return
+        elapsed=time.monotonic()-self.compare_started_at
+        self.compare_elapsed_var.set(f"경과 {self._format_elapsed(elapsed)}")
+        if self.compare_progress_value>0 and self.compare_progress_total>self.compare_progress_value:
+            rate=self.compare_progress_value/max(1,elapsed)
+            eta=(self.compare_progress_total-self.compare_progress_value)/rate if rate else 0
+            self.compare_eta_var.set(f"예상 {self._format_elapsed(eta)}")
+        else:
+            self.compare_eta_var.set("예상 계산 중...")
+        self.compare_timer_job=self.root.after(2000,self._update_compare_timer)
+
+    def _stop_compare_timer(self, complete=False):
+        if self.compare_timer_job is not None:
+            try:self.root.after_cancel(self.compare_timer_job)
+            except tk.TclError:pass
+            self.compare_timer_job=None
+        if self.compare_started_at is not None:
+            elapsed=time.monotonic()-self.compare_started_at
+            self.compare_elapsed_var.set(f"소요 {self._format_elapsed(elapsed)}")
+            self.compare_eta_var.set("예상 --:--:--" if not complete else "예상 00:00:00")
+            self.compare_started_at=None
+
+    def _set_compare_progress(self,value,total,status=None):
+        self.compare_progress_value=max(0,min(total,value))
+        self.compare_progress_total=max(1,total)
+        self.compare_progress.configure(maximum=self.compare_progress_total,value=self.compare_progress_value)
+        if status:
+            self.compare_status_var.set(status)
+            self._refresh_header()
+
+    def start_compare(self):
+        if self.running:
+            messagebox.showwarning("사용 중","백업/복구가 실행 중입니다.")
+            return
+        left=Path(self.compare_source_var.get().strip())
+        right=Path(self.compare_target_var.get().strip())
+        if not left.is_dir() or not right.is_dir():
+            messagebox.showerror("비교 오류","두 비교 경로를 모두 지정하세요.")
+            return
+        if left.resolve()==right.resolve():
+            messagebox.showerror("비교 오류","같은 폴더는 비교할 수 없습니다.")
+            return
+        self.running=True
+        self.compare_cancel_event=threading.Event()
+        self._set_compare_progress(0,1,"원본 스캔 중...")
+        self._set_compare_timeline(0)
+        self._start_compare_timer()
+        self.compare_button.configure(state="disabled")
+        self._compare_log(f"[START] {left}")
+        self._compare_log(f"[TARGET] {right}")
+        threading.Thread(
+            target=self.run_compare,
+            args=(left.resolve(),right.resolve(),self.compare_size_var.get(),self.compare_mtime_var.get(),self.compare_sha_var.get()),
+            daemon=True
+        ).start()
+
+    def run_compare(self,left,right,use_size,use_mtime,use_sha):
+        try:
+            self._set_compare_timeline(0)
+            left_files=self._scan_compare_folder(left)
+            self._set_compare_timeline(1)
+            right_files=self._scan_compare_folder(right)
+            all_count=max(1,len(set(left_files)|set(right_files)))
+            self._set_compare_progress(0,all_count,"파일 비교 중...")
+            results=[]
+            paths=sorted(set(left_files)|set(right_files))
+            for index,rel in enumerate(paths,1):
+                if hasattr(self,"compare_cancel_event") and self.compare_cancel_event.is_set():
+                    raise RuntimeError("비교가 정지되었습니다.")
+                left_item=left_files.get(rel)
+                right_item=right_files.get(rel)
+                results.append((rel,left_item,right_item))
+                self.compare_progress_value=index
+                if index % 250==0 or index==all_count:
+                    self.root.after(0,lambda i=index:self._set_compare_progress(i,all_count,f"파일 비교 중... {i:,}/{all_count:,}"))
+            self._set_compare_timeline(2)
+            final=self._compare_file_maps(left,right,left_files,right_files,use_size,use_mtime,use_sha)
+            self._set_compare_timeline(3)
+            same=sum(1 for r in final if r[0]=="일치")
+            different=sum(1 for r in final if r[0]=="다름")
+            left_only=sum(1 for r in final if r[0]=="누락")
+            right_only=sum(1 for r in final if r[0]=="추가")
+            summary={"same":same,"different":different,"left_only":left_only,"right_only":right_only}
+            self._set_compare_timeline(4)
+            def finish():
+                self.compare_summary=summary
+                for key,var in self.compare_summary_labels.items():var.set(f"{summary[key]:,}")
+                for item in self.compare_tree.get_children():self.compare_tree.delete(item)
+                shown=0
+                for status,rel,ls,rs in final:
+                    if status=="일치":continue
+                    if shown>=2000:break
+                    self.compare_tree.insert("", "end", values=(status,rel,self._format_size(ls) if ls is not None else "-",self._format_size(rs) if rs is not None else "-"))
+                    shown+=1
+                self.compare_result_info.configure(text=f"전체 {len(final):,}개 · 변경/누락/추가 {different+left_only+right_only:,}개 · 표에는 최대 2,000개 표시")
+                self.compare_status_var.set(f"비교 완료 · {len(final):,}개")
+                self._set_compare_timeline(6,success=True)
+                self._stop_compare_timer(complete=True)
+                self.running=False
+                self.compare_button.configure(state="normal")
+                self._refresh_header()
+            self.root.after(0,finish)
+        except Exception as exc:
+            error_text=str(exc)
+            self._compare_log(f"[FAIL] {error_text}")
+            def fail():
+                self.compare_status_var.set(f"실패 · {error_text}")
+                self._set_compare_timeline(2,error=True)
+                self._stop_compare_timer()
+                self.running=False
+                self.compare_button.configure(state="normal")
+                self._refresh_header()
+                messagebox.showerror("파일 비교 실패",error_text)
+            self.root.after(0,fail)
+
+    def set_app_mode(self, mode):
+        if mode not in ("일반 백업", "정밀 검사 백업", "파일 비교"):
+            mode = "일반 백업"
+        self.app_mode_var.set(mode)
+
+        if mode in ("일반 백업", "정밀 검사 백업"):
+            self.backup_mode_var.set(mode)
+            self.compare_view.pack_forget()
+            self.backup_view.pack(fill="both", expand=True)
+            self.timeline_steps = [
+                ("원본 분석", "scan"),
+                ("파일 목록 생성", "files"),
+                ("백업 복사", "copy"),
+                ("무결성 검사", "check"),
+                ("압축 (ZIP)", "zip"),
+                ("최종 검증", "shield"),
+                ("완료", "flag"),
+            ]
+            self._refresh_header()
+        else:
+            self.backup_view.pack_forget()
+            self.compare_view.pack(fill="both", expand=True)
+            self.compare_status_var.set("대기 중")
+            self._refresh_header()
+            self._set_compare_timeline(0, reset=True)
+
+        for key, card in self.mode_cards.items():
+            active = key == mode
+            color = card["color"]
+            if active:
+                card["frame"].configure(
+                    bg=color,
+                    highlightbackground=color,
+                    highlightthickness=2,
+                )
+                card["icon"].configure(bg="#FFFFFF", fg=color)
+                card["title"].configure(bg=color, fg="#FFFFFF")
+                card["text"].configure(bg=color, fg="#F8FAFC")
+                card["frame"].configure(relief="solid")
+            else:
+                card["frame"].configure(
+                    bg=self.colors["surface"],
+                    highlightbackground=self.colors["border"],
+                    highlightthickness=1,
+                )
+                card["icon"].configure(bg=color, fg="#FFFFFF")
+                card["title"].configure(bg=self.colors["surface"], fg=color)
+                card["text"].configure(bg=self.colors["surface"], fg=self.colors["muted"])
+
+        self.root.after_idle(lambda: self.scroll_canvas.configure(
+            scrollregion=self.scroll_canvas.bbox("all")
+        ))
+
+    def _draw_compare_timeline(self, _event=None):
+        self._set_compare_timeline(
+            getattr(self, "compare_timeline_state", (0, False, False, True))[0],
+            error=getattr(self, "compare_timeline_state", (0, False, False, True))[1],
+            success=getattr(self, "compare_timeline_state", (0, False, False, True))[2],
+        )
+
     def _on_mousewheel(self, event):
         delta = -1 * int(event.delta / 120)
         if delta:
@@ -1348,48 +1850,12 @@ class ParallelBackupApp:
         if mode not in ("일반 백업", "정밀 검사 백업"):
             return
         self.backup_mode_var.set(mode)
-        self._refresh_backup_mode_segment()
+        self.set_app_mode(mode)
         self._refresh_header()
         self.save_profile(silent=True)
 
     def _refresh_backup_mode_segment(self):
-        if not hasattr(self, "mode_buttons"):
-            return
-
-        active = self.backup_mode_var.get()
-        for mode, button in self.mode_buttons.items():
-            if mode == active:
-                selected_color = (
-                    self.colors["danger"]
-                    if mode == "정밀 검사 백업"
-                    else self.colors["primary"]
-                )
-                selected_active = (
-                    self.colors["danger_dark"]
-                    if mode == "정밀 검사 백업"
-                    else self.colors["primary_dark"]
-                )
-                button.configure(
-                    bg=selected_color,
-                    fg="#FFFFFF",
-                    activebackground=selected_active,
-                    activeforeground="#FFFFFF",
-                )
-            else:
-                button.configure(
-                    bg=self.colors["surface"],
-                    fg=self.colors["muted"],
-                    activebackground=(
-                        "#FEF2F2"
-                        if mode == "정밀 검사 백업"
-                        else self.colors["soft_indigo"]
-                    ),
-                    activeforeground=(
-                        self.colors["danger_dark"]
-                        if mode == "정밀 검사 백업"
-                        else self.colors["primary_dark"]
-                    ),
-                )
+        return
 
     def _refresh_metrics(self):
         if hasattr(self, "metric_targets"):
@@ -1522,6 +1988,7 @@ class ParallelBackupApp:
             "incremental": self.incremental_var.get(),
             "backup_mode": self.backup_mode_var.get(),
             "hardlink": self.hardlink_var.get(),
+            "app_mode": self.app_mode_var.get(),
             "parallel": self.parallel_var.get(),
             "keep": self.keep_var.get(),
             "exclude": self.exclude_var.get(),
@@ -1543,6 +2010,8 @@ class ParallelBackupApp:
         self.name_var.set(profile.get("name", "backup"))
         self.incremental_var.set(profile.get("incremental", True))
         self.backup_mode_var.set(profile.get("backup_mode", "일반 백업"))
+        self.app_mode_var.set(profile.get("app_mode", self.backup_mode_var.get()))
+
         self._refresh_backup_mode_segment()
         self._refresh_header()
         self.hardlink_var.set(profile.get("hardlink", True))
