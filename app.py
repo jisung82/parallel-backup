@@ -962,61 +962,115 @@ class ParallelBackupApp:
         self.root.bind_all("<MouseWheel>", self._on_mousewheel)
 
         mode_row = tk.Frame(content, bg=self.colors["bg"])
-        mode_row.pack(fill="x", padx=14, pady=(12, 10))
+        mode_row.pack(fill="x", padx=14, pady=(12, 14))
         self.mode_cards = {}
 
-        for key, title, desc, icon, color in [
+        mode_specs = [
             ("일반 백업", "일반 백업", "빠르고 안정적인 백업", "▣", self.colors["primary"]),
             ("정밀 검사 백업", "정밀 검사 백업", "SHA-256으로 더 꼼꼼하게 검증", "✓", self.colors["danger"]),
             ("파일 비교", "파일 비교", "두 폴더의 차이를 빠르게 확인", "↔", "#0F9D96"),
-        ]:
+        ]
+
+        for key, title, desc, icon, color in mode_specs:
             card = tk.Frame(
                 mode_row,
                 bg=self.colors["surface"],
                 highlightbackground=self.colors["border"],
                 highlightthickness=1,
+                bd=0,
                 cursor="hand2",
+                height=92,
             )
-            card.pack(side="left", fill="both", expand=True, padx=4)
-            icon_circle = tk.Label(
+            card.pack(
+                side="left",
+                fill="both",
+                expand=True,
+                padx=4,
+            )
+            card.pack_propagate(False)
+
+            accent = tk.Frame(card, bg=color, width=4)
+            accent.pack(side="left", fill="y")
+
+            icon_wrap = tk.Frame(
                 card,
+                bg=self.colors["soft_indigo"] if color != self.colors["danger"] else "#FEF2F2",
+                width=56,
+                height=56,
+            )
+            icon_wrap.pack(side="left", padx=(12, 10), pady=17)
+            icon_wrap.pack_propagate(False)
+
+            icon_circle = tk.Label(
+                icon_wrap,
                 text=icon,
                 bg=color,
                 fg="#FFFFFF",
                 font=(self.font_family, 16, "bold"),
-                width=3,
+                width=2,
                 height=1,
+                cursor="hand2",
             )
-            icon_circle.pack(side="left", padx=12, pady=12)
-            text_frame = tk.Frame(card, bg=self.colors["surface"])
-            text_frame.pack(side="left", fill="x", expand=True, pady=10)
+            icon_circle.place(relx=0.5, rely=0.5, anchor="center")
+
+            text_frame = tk.Frame(
+                card,
+                bg=self.colors["surface"],
+            )
+            text_frame.pack(
+                side="left",
+                fill="both",
+                expand=True,
+                pady=16,
+                padx=(0, 12),
+            )
+
             title_label = tk.Label(
                 text_frame,
                 text=title,
                 bg=self.colors["surface"],
-                fg=color if key != "일반 백업" else self.colors["primary"],
+                fg=color,
                 font=(self.font_family, 11, "bold"),
+                cursor="hand2",
             )
             title_label.pack(anchor="w")
+
             desc_label = tk.Label(
                 text_frame,
                 text=desc,
                 bg=self.colors["surface"],
                 fg=self.colors["muted"],
                 font=(self.font_family, 8),
+                cursor="hand2",
             )
-            desc_label.pack(anchor="w", pady=(2, 0))
+            desc_label.pack(anchor="w", pady=(4, 0))
+
             self.mode_cards[key] = {
                 "frame": card,
+                "accent": accent,
+                "icon_wrap": icon_wrap,
                 "icon": icon_circle,
                 "title": title_label,
                 "text": desc_label,
                 "color": color,
             }
-            for widget in (card, icon_circle, text_frame, title_label, desc_label):
-                widget.bind("<Button-1>", lambda _e, value=key: self.set_app_mode(value))
+
+            for widget in (
+                card,
+                accent,
+                icon_wrap,
+                icon_circle,
+                text_frame,
+                title_label,
+                desc_label,
+            ):
+                widget.bind(
+                    "<Button-1>",
+                    lambda _e, value=key: self.set_app_mode(value),
+                )
 
         self.mode_content = tk.Frame(content, bg=self.colors["bg"])
+
         self.mode_content.pack(fill="both", expand=True)
 
         self.backup_view = tk.Frame(self.mode_content, bg=self.colors["bg"])
@@ -1425,7 +1479,7 @@ class ParallelBackupApp:
 
         self.log = tk.Text(
             log_holder,
-            height=9,
+            height=8,
             state="disabled",
             wrap="word",
             bg="#FAFBFF",
@@ -1917,6 +1971,7 @@ class ParallelBackupApp:
     def set_app_mode(self, mode):
         if mode not in ("일반 백업", "정밀 검사 백업", "파일 비교"):
             mode = "일반 백업"
+
         self.app_mode_var.set(mode)
 
         if mode in ("일반 백업", "정밀 검사 백업"):
@@ -1943,35 +1998,57 @@ class ParallelBackupApp:
         for key, card in self.mode_cards.items():
             active = key == mode
             color = card["color"]
+
             if active:
+                tint = (
+                    "#FEF2F2"
+                    if key == "정밀 검사 백업"
+                    else "#ECFEFF"
+                    if key == "파일 비교"
+                    else self.colors["soft_indigo"]
+                )
                 card["frame"].configure(
-                    bg=color,
+                    bg=tint,
                     highlightbackground=color,
                     highlightthickness=2,
                 )
-                card["icon"].configure(bg="#FFFFFF", fg=color)
-                card["title"].configure(bg=color, fg="#FFFFFF")
-                card["text"].configure(bg=color, fg="#F8FAFC")
-                card["frame"].configure(relief="solid")
+                card["icon_wrap"].configure(bg=tint)
+                card["title"].configure(
+                    bg=tint,
+                    fg=color,
+                )
+                card["text"].configure(
+                    bg=tint,
+                    fg=self.colors["muted"],
+                )
             else:
                 card["frame"].configure(
                     bg=self.colors["surface"],
                     highlightbackground=self.colors["border"],
                     highlightthickness=1,
                 )
-                card["icon"].configure(bg=color, fg="#FFFFFF")
-                card["title"].configure(bg=self.colors["surface"], fg=color)
-                card["text"].configure(bg=self.colors["surface"], fg=self.colors["muted"])
+                card["icon_wrap"].configure(
+                    bg=(
+                        "#FEF2F2"
+                        if key == "정밀 검사 백업"
+                        else "#ECFEFF"
+                        if key == "파일 비교"
+                        else self.colors["soft_indigo"]
+                    )
+                )
+                card["title"].configure(
+                    bg=self.colors["surface"],
+                    fg=color,
+                )
+                card["text"].configure(
+                    bg=self.colors["surface"],
+                    fg=self.colors["muted"],
+                )
 
-        self.root.after_idle(lambda: self.scroll_canvas.configure(
-            scrollregion=self.scroll_canvas.bbox("all")
-        ))
-
-    def _draw_compare_timeline(self, _event=None):
-        self._set_compare_timeline(
-            getattr(self, "compare_timeline_state", (0, False, False, True))[0],
-            error=getattr(self, "compare_timeline_state", (0, False, False, True))[1],
-            success=getattr(self, "compare_timeline_state", (0, False, False, True))[2],
+        self.root.after_idle(
+            lambda: self.scroll_canvas.configure(
+                scrollregion=self.scroll_canvas.bbox("all")
+            )
         )
 
     def _on_mousewheel(self, event):
