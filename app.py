@@ -305,7 +305,6 @@ class ParallelBackupApp:
         self.build_ui()
         self.load_profile()
         self._refresh_metrics()
-        self.root.after_idle(self._autosize_window)
 
     def _setup_style(self):
         self.colors = {
@@ -636,16 +635,57 @@ class ParallelBackupApp:
         self.root.title("Parallel Backup")
         self.root.geometry("1040x820")
         self.root.minsize(920, 720)
-        self._user_resized = False
-        self.root.bind("<Configure>", self._track_manual_resize)
 
         outer = tk.Frame(self.root, bg=self.colors["bg"])
         outer.pack(fill="both", expand=True)
 
         self._gradient_header(outer)
 
-        content = ttk.Frame(outer, padding=(20, 16, 20, 14))
-        content.pack(fill="both", expand=True)
+        scroll_area = tk.Frame(outer, bg=self.colors["bg"])
+        scroll_area.pack(fill="both", expand=True)
+
+        self.scroll_canvas = tk.Canvas(
+            scroll_area,
+            bg=self.colors["bg"],
+            highlightthickness=0,
+            bd=0,
+        )
+        self.scroll_canvas.pack(side="left", fill="both", expand=True)
+
+        self.scrollbar = ttk.Scrollbar(
+            scroll_area,
+            orient="vertical",
+            command=self.scroll_canvas.yview,
+        )
+        self.scrollbar.pack(side="right", fill="y")
+        self.scroll_canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        content = tk.Frame(
+            self.scroll_canvas,
+            bg=self.colors["bg"],
+        )
+        self.scroll_window = self.scroll_canvas.create_window(
+            (0, 0),
+            window=content,
+            anchor="nw",
+        )
+
+        def update_scroll_region(_event=None):
+            self.scroll_canvas.configure(
+                scrollregion=self.scroll_canvas.bbox("all")
+            )
+
+        def resize_content(event):
+            self.scroll_canvas.itemconfigure(
+                self.scroll_window,
+                width=event.width,
+            )
+
+        content.bind("<Configure>", update_scroll_region)
+        self.scroll_canvas.bind("<Configure>", resize_content)
+
+        self.scroll_canvas.bind("<Enter>", self._bind_mousewheel)
+        self.scroll_canvas.bind("<Leave>", self._unbind_mousewheel)
 
         top = ttk.Frame(content)
         top.pack(fill="x", pady=(0, 12))
@@ -1029,43 +1069,18 @@ class ParallelBackupApp:
         )
         self.log.pack(fill="both", expand=True)
 
-        self.root.bind("<Configure>", lambda _event: self._refresh_metrics())
         self._refresh_metrics()
 
-    def _track_manual_resize(self, event):
-        if event.widget is self.root:
-            self._user_resized = True
+    def _on_mousewheel(self, event):
+        delta = -1 * int(event.delta / 120)
+        if delta:
+            self.scroll_canvas.yview_scroll(delta, "units")
 
-    def _autosize_window(self):
-        if getattr(self, "_autosizing", False):
-            return
+    def _bind_mousewheel(self, _event=None):
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel)
 
-        self._autosizing = True
-        try:
-            self.root.update_idletasks()
-
-            screen_width = self.root.winfo_screenwidth()
-            screen_height = self.root.winfo_screenheight()
-
-            requested_width = max(1040, self.root.winfo_reqwidth())
-            requested_height = max(820, self.root.winfo_reqheight())
-
-            max_width = max(1040, screen_width - 40)
-            max_height = max(720, screen_height - 80)
-
-            # The window grows automatically while there is room on screen.
-            # Manual user resizing is respected after the initial layout.
-            current_width = self.root.winfo_width()
-            current_height = self.root.winfo_height()
-
-            if not self._user_resized or len(self.destination_rows) > 0:
-                width = min(max(requested_width, current_width), max_width)
-                height = min(requested_height, max_height)
-
-                if height != current_height or width != current_width:
-                    self.root.geometry(f"{width}x{height}")
-        finally:
-            self._autosizing = False
+    def _unbind_mousewheel(self, _event=None):
+        self.root.unbind_all("<MouseWheel>")
 
     def _refresh_metrics(self):
         if hasattr(self, "metric_targets"):
