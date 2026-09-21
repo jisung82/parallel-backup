@@ -14,7 +14,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
 APP_TITLE = "Parallel Backup"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
@@ -304,6 +304,7 @@ class ParallelBackupApp:
         self._setup_style()
         self.build_ui()
         self.load_profile()
+        self._refresh_metrics()
 
     def _setup_style(self):
         self.colors = {
