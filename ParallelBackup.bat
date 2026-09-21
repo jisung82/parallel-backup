@@ -20,6 +20,7 @@ echo.
 goto END
 
 :USE_PY
+if "%PARALLEL_BACKUP_TEST%"=="1" goto TEST_PY
 echo Python launcher found.
 echo Starting Parallel Backup...
 echo.
@@ -27,11 +28,33 @@ py -3 "%~dp0app.py"
 goto SHOW_RESULT
 
 :USE_PYTHON
+if "%PARALLEL_BACKUP_TEST%"=="1" goto TEST_PYTHON
 echo python.exe found.
 echo Starting Parallel Backup...
 echo.
 python "%~dp0app.py"
 goto SHOW_RESULT
+
+:TEST_PY
+echo Testing Python launcher...
+py -3 --version
+if errorlevel 1 goto TEST_FAILED
+py -3 -m py_compile "%~dp0app.py"
+if errorlevel 1 goto TEST_FAILED
+echo [PASS] BAT and app.py test passed.
+goto END
+
+:TEST_PYTHON
+echo Testing python.exe...
+python --version
+if errorlevel 1 goto TEST_FAILED
+python -m py_compile "%~dp0app.py"
+if errorlevel 1 goto TEST_FAILED
+echo [PASS] BAT and app.py test passed.
+goto END
+
+:TEST_FAILED
+echo [FAIL] BAT or app.py test failed.
 
 :SHOW_RESULT
 echo.
