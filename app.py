@@ -637,16 +637,96 @@ class ParallelBackupApp:
         )
         canvas.pack(fill="x")
 
+        self.header_mode_frame = tk.Frame(
+            canvas,
+            bg=self.colors["surface"],
+            highlightthickness=0,
+            bd=0,
+        )
+
+        status_frame = tk.Frame(
+            self.header_mode_frame,
+            bg=self.colors["surface"],
+            highlightthickness=0,
+            bd=0,
+        )
+        status_frame.pack(fill="x")
+
+        self.header_status_label = tk.Label(
+            status_frame,
+            textvariable=self.status_var,
+            bg=self.colors["surface"],
+            fg=self.colors["primary_dark"],
+            font=(self.font_family, 9, "bold"),
+            width=19,
+            height=1,
+            pady=7,
+        )
+        self.header_status_label.pack(fill="x")
+
+        segment_shell = tk.Frame(
+            self.header_mode_frame,
+            bg=self.colors["border"],
+            highlightthickness=0,
+            bd=0,
+        )
+        segment_shell.pack(fill="x", pady=(4, 0), ipady=1)
+
+        self.header_mode_buttons = {}
+        for mode_key, label in [
+            ("일반 백업", "일반"),
+            ("정밀 검사 백업", "정밀 검사"),
+        ]:
+            button = tk.Button(
+                segment_shell,
+                text=label,
+                command=lambda value=mode_key: self.set_backup_mode(value),
+                relief="flat",
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2",
+                font=(self.font_family, 8, "bold"),
+                padx=10,
+                pady=4,
+            )
+            button.pack(side="left", fill="x", expand=True)
+            self.header_mode_buttons[mode_key] = button
+
+        self.header_mode_window = canvas.create_window(
+            0, 0,
+            window=self.header_mode_frame,
+            anchor="nw",
+            width=152,
+        )
+
         def draw(event=None):
             width = canvas.winfo_width()
             height = canvas.winfo_height()
-            canvas.delete("all")
+            canvas.delete("background")
+
+            precision = self.backup_mode_var.get() == "정밀 검사 백업"
+            if precision:
+                left = (220, 38, 38)
+                right = (239, 68, 68)
+                blob_right = "#F87171"
+                blob_left = "#991B1B"
+                subtitle = "#FEE2E2"
+                version = "#FECACA"
+                status_fg = self.colors["danger_dark"]
+            else:
+                left = (79, 70, 229)
+                right = (124, 58, 237)
+                blob_right = "#8B5CF6"
+                blob_left = "#4338CA"
+                subtitle = "#E0E7FF"
+                version = "#E0E7FF"
+                status_fg = self.colors["primary_dark"]
 
             steps = max(2, width)
+            r1, g1, b1 = left
+            r2, g2, b2 = right
             for x in range(steps):
                 t = x / max(1, steps - 1)
-                r1, g1, b1 = (79, 70, 229)
-                r2, g2, b2 = (124, 58, 237)
                 color = "#{:02X}{:02X}{:02X}".format(
                     int(r1 + (r2 - r1) * t),
                     int(g1 + (g2 - g1) * t),
@@ -654,16 +734,17 @@ class ParallelBackupApp:
                 )
                 canvas.create_rectangle(
                     x, 0, x + 2, height,
-                    fill=color, outline=color
+                    fill=color, outline=color,
+                    tags="background",
                 )
 
             canvas.create_oval(
                 width - 210, -90, width + 60, 180,
-                fill="#8B5CF6", outline=""
+                fill=blob_right, outline="", tags="background"
             )
             canvas.create_oval(
                 -80, 72, 120, 272,
-                fill="#4338CA", outline=""
+                fill=blob_left, outline="", tags="background"
             )
 
             canvas.create_text(
@@ -672,39 +753,72 @@ class ParallelBackupApp:
                 text="Parallel Backup",
                 fill="#FFFFFF",
                 font=(self.font_family, 24, "bold"),
+                tags="background",
             )
             canvas.create_text(
                 31, 67,
                 anchor="nw",
                 text="안전한 병렬 백업 · 증분 스냅샷 · SHA-256 검증",
-                fill="#E0E7FF",
+                fill=subtitle,
                 font=(self.font_family, 10),
-            )
-
-            status = self.status_var.get()
-            canvas.create_rectangle(
-                width - 178, 27, width - 26, 61,
-                fill="#FFFFFF", outline=""
-            )
-            canvas.create_text(
-                width - 102, 44,
-                text=status,
-                fill=self.colors["primary_dark"],
-                font=(self.font_family, 9, "bold"),
+                tags="background",
             )
             canvas.create_text(
                 width - 30, 113,
                 anchor="e",
                 text=f"v{APP_VERSION}",
-                fill="#E0E7FF",
+                fill=version,
                 font=(self.font_family, 8, "bold"),
+                tags="background",
             )
 
+            canvas.coords(
+                self.header_mode_window,
+                width - 190,
+                20,
+            )
+            self.header_mode_frame.configure(
+                bg=self.colors["surface"],
+            )
+            self.header_status_label.configure(
+                fg=status_fg,
+            )
+            self._refresh_header_segment_colors()
+
         canvas.bind("<Configure>", draw)
-        canvas.bind("<Button-1>", lambda _e: None)
         self.header_canvas = canvas
+        self._draw_header = draw
         return canvas
 
+    def _refresh_header_segment_colors(self):
+        if not hasattr(self, "header_mode_buttons"):
+            return
+
+        active = self.backup_mode_var.get()
+        precision = active == "정밀 검사 백업"
+        selected = self.colors["danger"] if precision else self.colors["primary"]
+        selected_active = self.colors["danger_dark"] if precision else self.colors["primary_dark"]
+        selected_text = "#FFFFFF"
+
+        for mode, button in self.header_mode_buttons.items():
+            if mode == active:
+                button.configure(
+                    bg=selected,
+                    fg=selected_text,
+                    activebackground=selected_active,
+                    activeforeground=selected_text,
+                )
+            else:
+                button.configure(
+                    bg=self.colors["surface"],
+                    fg=self.colors["muted"],
+                    activebackground="#FEF2F2" if precision else self.colors["soft_indigo"],
+                    activeforeground=self.colors["danger_dark"] if precision else self.colors["primary_dark"],
+                )
+
+    def _refresh_header(self):
+        if hasattr(self, "_draw_header"):
+            self._draw_header()
     def _metric_card(self, parent, title, value_var, accent):
         wrapper, card = self._card(parent, padding=13)
         ttk.Label(
@@ -910,43 +1024,6 @@ class ParallelBackupApp:
             text="권장 기본값을 그대로 사용해도 됩니다.",
             style="Body.TLabel",
         ).pack(anchor="w", pady=(0, 10))
-
-        ttk.Label(
-            options_card,
-            text="백업 방식",
-            foreground=self.colors["muted"],
-            font=(self.font_family, 9, "bold"),
-        ).pack(anchor="w", pady=(0, 4))
-
-        mode_row = tk.Frame(
-            options_card,
-            bg=self.colors["border"],
-            highlightthickness=0,
-            bd=0,
-        )
-        mode_row.pack(fill="x", pady=(0, 6), ipady=1)
-
-        self.mode_buttons = {}
-        for mode_key, label in [
-            ("일반 백업", "일반 백업"),
-            ("정밀 검사 백업", "정밀 검사 백업"),
-        ]:
-            button = tk.Button(
-                mode_row,
-                text=label,
-                command=lambda value=mode_key: self.set_backup_mode(value),
-                relief="flat",
-                bd=0,
-                highlightthickness=0,
-                cursor="hand2",
-                font=(self.font_family, 9, "bold"),
-                padx=14,
-                pady=8,
-            )
-            button.pack(side="left", fill="x", expand=True)
-            self.mode_buttons[mode_key] = button
-
-        self._refresh_backup_mode_segment();
 
         option_grid = ttk.Frame(options_card, style="Card.TFrame")
         option_grid.pack(fill="x", pady=(4, 0))
@@ -1229,6 +1306,7 @@ class ParallelBackupApp:
             return
         self.backup_mode_var.set(mode)
         self._refresh_backup_mode_segment()
+        self._refresh_header()
         self.save_profile(silent=True)
 
     def _refresh_backup_mode_segment(self):
@@ -1423,6 +1501,7 @@ class ParallelBackupApp:
         self.incremental_var.set(profile.get("incremental", True))
         self.backup_mode_var.set(profile.get("backup_mode", "일반 백업"))
         self._refresh_backup_mode_segment()
+        self._refresh_header()
         self.hardlink_var.set(profile.get("hardlink", True))
         self.parallel_var.set(int(profile.get("parallel", 3)))
         self.keep_var.set(int(profile.get("keep", 10)))
@@ -1490,6 +1569,7 @@ class ParallelBackupApp:
                 self.progress.configure(value=self.progress_value)
             if status is not None:
                 self.status_var.set(status)
+                self._refresh_header()
         self.root.after(0, update)
 
     def advance_progress(self):
@@ -1501,7 +1581,8 @@ class ParallelBackupApp:
     def cancel_backup(self):
         if self.running:
             self.cancel_event.set()
-            self.status_var.set("취소 요청...")
+            self.status_var.set("정지 요청...")
+            self._refresh_header()
             self.write_log("[CANCEL] 취소 요청됨")
 
     def validate(self):
@@ -1585,6 +1666,7 @@ class ParallelBackupApp:
         self.status_var.set(
             "정밀 원본 분석 중..." if deep_scan else "원본 빠른 분석 중..."
         )
+        self._refresh_header()
         self._start_operation_timer()
 
         self.write_log(f"[START] {source}")
@@ -1710,6 +1792,7 @@ class ParallelBackupApp:
 
                 if failed == 0:
                     self.status_var.set(f"완료 · {success}/{len(results)}개 대상")
+                    self._refresh_header()
                     messagebox.showinfo(
                         "백업 완료",
                         f"{success}개 경로 백업 완료\n소요 시간: {elapsed_text}",
@@ -1718,6 +1801,7 @@ class ParallelBackupApp:
                     self.status_var.set(
                         f"완료 · {success} 성공 / {failed} 실패"
                     )
+                    self._refresh_header()
                     messagebox.showwarning(
                         "백업 결과",
                         f"성공: {success}\n실패: {failed}\n소요 시간: {elapsed_text}\n로그를 확인하세요.",
@@ -1735,6 +1819,7 @@ class ParallelBackupApp:
                 elapsed_text = self._format_elapsed(self.last_elapsed_seconds)
                 self._stop_operation_timer()
                 self.status_var.set(f"실패 · {elapsed_text}")
+                self._refresh_header()
                 messagebox.showerror("백업 실패", f"{exc}\n\n소요 시간: {elapsed_text}")
 
             self.root.after(0, finish_error)
