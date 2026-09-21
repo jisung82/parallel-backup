@@ -151,6 +151,7 @@ class ParallelBackupApp:
         self.progress_value = 0
         self.progress_total = 1
         self.progress_lock = threading.Lock()
+        self.cancel_event = threading.Event()
 
         self.build_ui()
 
@@ -229,6 +230,13 @@ class ParallelBackupApp:
             action, text="병렬 백업 시작", command=self.start_backup
         )
         self.backup_button.pack(side="left")
+        self.cancel_button = ttk.Button(
+            action, text="취소", command=self.cancel_backup, state="disabled"
+        )
+        self.cancel_button.pack(side="left", padx=5)
+        ttk.Button(
+            action, text="복구", command=self.restore_backup
+        ).pack(side="left", padx=5)
         ttk.Label(action, textvariable=self.status_var).pack(side="right")
 
         self.progress = ttk.Progressbar(outer, mode="determinate", maximum=1)
@@ -258,6 +266,80 @@ class ParallelBackupApp:
     def clear_destinations(self):
         self.destinations.clear()
         self.dest_list.delete(0, "end")
+
+    def cancel_backup(self):
+        if self.running:
+            self.cancel_event.set()
+            self.status_var.set("취소 요청...")
+            self.write_log("[CANCEL] 취소 요청됨")
+
+    def restore_backup(self):
+        if self.running:
+            messagebox.showwarning("사용 중", "백업 또는 복구가 끝난 후 실행하세요.")
+            return
+
+        backup_path_text = filedialog.askdirectory(title="복구할 백업 폴더 선택")
+        if not backup_path_text:
+            return
+
+        backup_path = Path(backup_path_text).resolve()
+        manifest_path = backup_path / MANIFEST_DIR / MANIFEST_FILE
+
+        if not manifest_path.is_file():
+            messagebox.showerror(
+                "복구 오류",
+                "선택한 폴더에서 .parallel-backup/manifest.json을 찾을 수 없습니다."
+            )
+            return
+
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            messagebox.showerror("복구 오류", f"manifest 읽기 실패:\n{exc}")
+            return
+
+        if manifest.get("version") != 2 or manifest.get("verified") is not True:
+            messagebox.showerror(
+                "복구 오류",
+                "검증 완료된 v2 백업만 복구할 수 있습니다."
+            )
+            return
+
+        target_text = filedialog.askdirectory(title="복구 대상 폴더 선택")
+        if not target_text:
+            return
+
+        target = Path(target_text).resolve()
+        target.mkdir(parents=True, exist_ok=True)
+
+        if any(target.iterdir()):
+            confirmed = messagebox.askyesno(
+                "복구 확인",
+                f"대상 폴더에 기존 파일이 있습니다.\n\n{target}\n\n"
+                "동일 경로의 파일을 덮어쓰면서 복구할까요?"
+            )
+            if not confirmed:
+                return
+
+        file_count = len(manifest.get("files", {}))
+        self.running = True
+        self.cancel_event.clear()
+        self.backup_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal")
+        self.progress_value = 0
+        self.progress_total = max(1, file_count * 2)
+        self.progress.configure(value=0, maximum=self.progress_total)
+        self.status_var.set("복구 중...")
+
+        self.write_log(f"[RESTORE] {backup_path}")
+        self.write_log(f"[RESTORE TARGET] {target}")
+        self.write_log(f"[RESTORE FILES] {file_count:,}")
+
+        threading.Thread(
+            target=self.run_restore,
+            args=(backup_path, target, manifest),
+            daemon=True,
+        ).start()
 
     def write_log(self, message):
         def update():
@@ -339,7 +421,9 @@ class ParallelBackupApp:
         incremental = self.incremental_var.get()
 
         self.running = True
+        self.cancel_event.clear()
         self.backup_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal")
         self.progress.configure(value=0, maximum=1)
         self.progress_value = 0
         self.progress_total = 1
@@ -369,6 +453,8 @@ class ParallelBackupApp:
         try:
             self.write_log("[SCAN] 원본 파일 SHA-256 계산 시작")
             source_data = build_source_manifest(source)
+            if self.cancel_event.is_set():
+                raise RuntimeError("백업이 취소되었습니다.")
             files_count = len(source_data["files"])
             self.write_log(f"[SCAN] 파일 {files_count:,}개 해시 완료")
 
@@ -402,6 +488,7 @@ class ParallelBackupApp:
             def finish():
                 self.running = False
                 self.backup_button.configure(state="normal")
+                self.cancel_button.configure(state="disabled")
                 if failed == 0:
                     self.status_var.set(f"완료: {success}/{len(results)}")
                     messagebox.showinfo(
@@ -425,6 +512,7 @@ class ParallelBackupApp:
             def fail_finish():
                 self.running = False
                 self.backup_button.configure(state="normal")
+                self.cancel_button.configure(state="disabled")
                 self.status_var.set("실패")
                 messagebox.showerror("백업 실패", str(exc))
 
@@ -478,6 +566,9 @@ class ParallelBackupApp:
             )
 
             for rel, info in source_data["files"].items():
+                if self.cancel_event.is_set():
+                    raise RuntimeError("백업이 취소되었습니다.")
+
                 src = source / Path(rel)
                 dst = target / Path(rel)
 
@@ -544,6 +635,69 @@ class ParallelBackupApp:
         except Exception as exc:
             self.write_log(f"[FAIL] {destination} -> {exc}")
             return {"ok": False, "target": str(target), "error": str(exc)}
+
+
+    def run_restore(self, backup_path: Path, target: Path, manifest: dict):
+        files = manifest.get("files", {})
+        restored = 0
+
+        try:
+            for rel in files:
+                if self.cancel_event.is_set():
+                    raise RuntimeError("복구가 취소되었습니다.")
+
+                source_file = backup_path / Path(rel)
+                target_file = target / Path(rel)
+
+                if not source_file.is_file():
+                    raise FileNotFoundError(f"백업 파일 없음: {rel}")
+
+                target_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_file, target_file)
+                restored += 1
+                self.advance_progress()
+
+            self.write_log("[RESTORE VERIFY] 복구 결과 SHA-256 검사")
+
+            for rel, info in files.items():
+                if self.cancel_event.is_set():
+                    raise RuntimeError("복구가 취소되었습니다.")
+
+                target_file = target / Path(rel)
+                if not target_file.is_file():
+                    raise FileNotFoundError(f"복구 파일 없음: {rel}")
+
+                actual = sha256_file(target_file)
+                if actual != info.get("sha256"):
+                    raise IOError(
+                        f"복구 SHA-256 불일치: {rel} "
+                        f"(expected={info.get('sha256')}, actual={actual})"
+                    )
+                self.advance_progress()
+
+            def finish_restore():
+                self.running = False
+                self.backup_button.configure(state="normal")
+                self.cancel_button.configure(state="disabled")
+                self.status_var.set(f"복구 완료: {restored:,}개")
+                messagebox.showinfo(
+                    "복구 완료",
+                    f"{restored:,}개 파일을 복구하고 SHA-256 검증을 완료했습니다."
+                )
+
+            self.root.after(0, finish_restore)
+
+        except Exception as exc:
+            self.write_log(f"[RESTORE FAIL] {exc}")
+
+            def fail_restore():
+                self.running = False
+                self.backup_button.configure(state="normal")
+                self.cancel_button.configure(state="disabled")
+                self.status_var.set("복구 실패")
+                messagebox.showerror("복구 실패", str(exc))
+
+            self.root.after(0, fail_restore)
 
 
 if __name__ == "__main__":
