@@ -383,6 +383,10 @@ class ParallelBackupApp:
         self.keep_var = tk.IntVar(value=10)
         self.exclude_var = tk.StringVar()
         self.status_var = tk.StringVar(value="대기 중")
+        self.elapsed_var = tk.StringVar(value="경과 00:00:00")
+        self.operation_started_at = None
+        self.elapsed_job = None
+        self.last_elapsed_seconds = 0
 
         self.destinations = []
         self.running = False
@@ -1136,14 +1140,26 @@ class ParallelBackupApp:
             fg="#A5B4FC",
             font=(self.font_family, 8, "bold"),
         ).pack(anchor="w")
+        status_row = tk.Frame(status_left, bg="#111827")
+        status_row.pack(fill="x", pady=(2, 0))
+
         self.status_label = tk.Label(
-            status_left,
+            status_row,
             textvariable=self.status_var,
             bg="#111827",
             fg="#FFFFFF",
             font=(self.font_family, 11, "bold"),
         )
-        self.status_label.pack(anchor="w", pady=(2, 0))
+        self.status_label.pack(side="left", anchor="w")
+
+        self.elapsed_label = tk.Label(
+            status_row,
+            textvariable=self.elapsed_var,
+            bg="#111827",
+            fg="#CBD5E1",
+            font=(self.font_family, 9, "bold"),
+        )
+        self.elapsed_label.pack(side="left", padx=(12, 0), anchor="w")
 
         progress_wrap = tk.Frame(status_card, bg="#111827")
         progress_wrap.pack(side="right", fill="x", expand=True, padx=15, pady=14)
@@ -1422,6 +1438,48 @@ class ParallelBackupApp:
             self.log.configure(state="disabled")
         self.root.after(0, update)
 
+    def _format_elapsed(self, seconds):
+        seconds = max(0, int(seconds))
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    def _start_operation_timer(self):
+        self._stop_operation_timer()
+        self.operation_started_at = time.monotonic()
+        self.last_elapsed_seconds = 0
+        self.elapsed_var.set("경과 00:00:00")
+        self.elapsed_job = self.root.after(1000, self._update_elapsed)
+
+    def _update_elapsed(self):
+        if self.operation_started_at is None:
+            self.elapsed_job = None
+            return
+
+        self.last_elapsed_seconds = time.monotonic() - self.operation_started_at
+        self.elapsed_var.set(
+            f"경과 {self._format_elapsed(self.last_elapsed_seconds)}"
+        )
+        self.elapsed_job = self.root.after(1000, self._update_elapsed)
+
+    def _stop_operation_timer(self):
+        if self.elapsed_job is not None:
+            try:
+                self.root.after_cancel(self.elapsed_job)
+            except tk.TclError:
+                pass
+            self.elapsed_job = None
+
+        if self.operation_started_at is not None:
+            self.last_elapsed_seconds = time.monotonic() - self.operation_started_at
+            self.elapsed_var.set(
+                f"소요 {self._format_elapsed(self.last_elapsed_seconds)}"
+            )
+            self.operation_started_at = None
+
+    def _set_operation(self, status):
+        self.root.after(0, lambda: self.status_var.set(status))
+
     def set_progress(self, value=None, total=None, status=None):
         def update():
             if total is not None:
@@ -1527,6 +1585,7 @@ class ParallelBackupApp:
         self.status_var.set(
             "정밀 원본 분석 중..." if deep_scan else "원본 빠른 분석 중..."
         )
+        self._start_operation_timer()
 
         self.write_log(f"[START] {source}")
         self.write_log(f"[TARGETS] {len(destinations)}개 | workers={parallel}")
@@ -1602,11 +1661,15 @@ class ParallelBackupApp:
             self.set_progress(
                 value=0,
                 total=expected_ops,
-                status=f"백업 중... {file_count:,} 파일",
+                status=f"백업 준비 완료 · {file_count:,} 파일",
             )
 
             workers = min(parallel, len(destinations))
             results = []
+
+            self._set_operation(
+                f"백업 복사 중 · {len(destinations)}개 대상 병렬 처리"
+            )
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_map = {
@@ -1642,19 +1705,22 @@ class ParallelBackupApp:
                 self.running = False
                 self.backup_button.configure(state="normal")
                 self.cancel_button.configure(state="disabled")
+                elapsed_text = self._format_elapsed(self.last_elapsed_seconds)
+                self._stop_operation_timer()
+
                 if failed == 0:
-                    self.status_var.set(f"완료: {success}/{len(results)}")
+                    self.status_var.set(f"완료 · {success}/{len(results)}개 대상")
                     messagebox.showinfo(
                         "백업 완료",
-                        f"{success}개 경로 백업 완료",
+                        f"{success}개 경로 백업 완료\n소요 시간: {elapsed_text}",
                     )
                 else:
                     self.status_var.set(
-                        f"완료: {success} 성공 / {failed} 실패"
+                        f"완료 · {success} 성공 / {failed} 실패"
                     )
                     messagebox.showwarning(
                         "백업 결과",
-                        f"성공: {success}\n실패: {failed}\n로그를 확인하세요.",
+                        f"성공: {success}\n실패: {failed}\n소요 시간: {elapsed_text}\n로그를 확인하세요.",
                     )
 
             self.root.after(0, finish)
@@ -1666,8 +1732,10 @@ class ParallelBackupApp:
                 self.running = False
                 self.backup_button.configure(state="normal")
                 self.cancel_button.configure(state="disabled")
-                self.status_var.set("실패")
-                messagebox.showerror("백업 실패", str(exc))
+                elapsed_text = self._format_elapsed(self.last_elapsed_seconds)
+                self._stop_operation_timer()
+                self.status_var.set(f"실패 · {elapsed_text}")
+                messagebox.showerror("백업 실패", f"{exc}\n\n소요 시간: {elapsed_text}")
 
             self.root.after(0, finish_error)
 
@@ -1739,6 +1807,9 @@ class ParallelBackupApp:
 
             ensure_free_space(destination, required_bytes)
 
+            self._set_operation(
+                f"백업 복사 중 · {destination.name or destination}"
+            )
             self.write_log(
                 f"[BEGIN] {destination} | "
                 f"reuse={reusable_bytes / (1024**3):.2f} GB "
@@ -1808,6 +1879,9 @@ class ParallelBackupApp:
 
             write_manifest(partial_target, manifest)
 
+            self._set_operation(
+                f"{'정밀 무결성 검사' if deep_scan else '빠른 무결성 검사'} · {destination.name or destination}"
+            )
             self.write_log(
                 f"[VERIFY] {destination} | "
                 f"{'SHA-256' if deep_scan else '빠른 검사'}"
@@ -1838,6 +1912,9 @@ class ParallelBackupApp:
             archive_target = destination / f"{backup_name}.zip"
             partial_archive = destination / f".parallel-backup.partial-{uuid.uuid4().hex}.zip"
 
+            self._set_operation(
+                f"ZIP 압축 중 · {destination.name or destination}"
+            )
             self.write_log(f"[ZIP] 생성 시작: {archive_target.name}")
             create_zip_archive(
                 final_target,
@@ -1846,6 +1923,9 @@ class ParallelBackupApp:
                 self.cancel_event,
             )
 
+            self._set_operation(
+                f"ZIP 무결성 검사 중 · {destination.name or destination}"
+            )
             self.write_log(f"[ZIP VERIFY] {archive_target.name}")
             verify_zip_archive(
                 partial_archive,
