@@ -47,6 +47,8 @@ echo Python Launcher: "!PYTHON_LAUNCHER!"
 goto RUN_APP
 
 :RUN_APP
+if "%PARALLEL_BACKUP_TEST%"=="1" goto TEST_MODE
+
 echo Starting Parallel Backup...
 echo.
 
@@ -70,6 +72,27 @@ if not "!EXIT_CODE!"=="0" (
 ) else (
     echo 프로그램이 정상 종료되었습니다.
 )
+
+:TEST_MODE
+echo Testing Python runtime...
+if defined PYTHON_EXE (
+    "!PYTHON_EXE!" --version
+    if errorlevel 1 goto TEST_FAILED
+    "!PYTHON_EXE!" -m py_compile "%~dp0app.py"
+) else (
+    "!PYTHON_LAUNCHER!" -3 --version
+    if errorlevel 1 goto TEST_FAILED
+    "!PYTHON_LAUNCHER!" -3 -m py_compile "%~dp0app.py"
+)
+if errorlevel 1 goto TEST_FAILED
+echo [PASS] Python and app.py checks passed.
+set "EXIT_CODE=0"
+goto FINISH
+
+:TEST_FAILED
+echo [FAIL] Python/app.py test failed.
+set "EXIT_CODE=1"
+goto FINISH
 
 :FINISH
 echo.
