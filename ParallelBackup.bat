@@ -1,7 +1,5 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
 title Parallel Backup
-
 cd /d "%~dp0"
 
 echo ==========================================
@@ -9,93 +7,40 @@ echo        Parallel Backup Launcher
 echo ==========================================
 echo.
 
-set "PYTHON_EXE="
-set "PYTHON_LAUNCHER="
+where py.exe >nul 2>nul
+if %errorlevel%==0 goto USE_PY
 
-rem Find a real python.exe first. Ignore the Microsoft Store execution alias.
-for /f "delims=" %%P in ('where python.exe 2^>nul') do (
-    echo %%P | findstr /I /C:"\WindowsApps\" >nul
-    if errorlevel 1 (
-        "%%P" --version >nul 2>&1
-        if not errorlevel 1 (
-            set "PYTHON_EXE=%%P"
-            goto FOUND_PYTHON
-        )
-    )
-)
+where python.exe >nul 2>nul
+if %errorlevel%==0 goto USE_PYTHON
 
-rem Then try the Python launcher.
-for /f "delims=" %%P in ('where py.exe 2^>nul') do (
-    "%%P" -3 --version >nul 2>&1
-    if not errorlevel 1 (
-        set "PYTHON_LAUNCHER=%%P"
-        goto FOUND_LAUNCHER
-    )
-)
-
-echo [ERROR] 실제 Python 실행 파일을 찾지 못했습니다.
-echo Python 설치: https://www.python.org/downloads/windows/
+echo [ERROR] Python was not found.
+echo Install Python from:
+echo https://www.python.org/downloads/windows/
 echo.
-goto FINISH
+goto END
 
-:FOUND_PYTHON
-echo Python: "!PYTHON_EXE!"
-goto RUN_APP
-
-:FOUND_LAUNCHER
-echo Python Launcher: "!PYTHON_LAUNCHER!"
-goto RUN_APP
-
-:RUN_APP
-if "%PARALLEL_BACKUP_TEST%"=="1" goto TEST_MODE
-
+:USE_PY
+echo Python launcher found.
 echo Starting Parallel Backup...
 echo.
+py -3 "%~dp0app.py"
+goto SHOW_RESULT
 
-if defined PYTHON_EXE (
-    "!PYTHON_EXE!" "%~dp0app.py" 2>&1
-    set "EXIT_CODE=!errorlevel!"
-) else (
-    "!PYTHON_LAUNCHER!" -3 "%~dp0app.py" 2>&1
-    set "EXIT_CODE=!errorlevel!"
-)
+:USE_PYTHON
+echo python.exe found.
+echo Starting Parallel Backup...
+echo.
+python "%~dp0app.py"
+goto SHOW_RESULT
 
+:SHOW_RESULT
 echo.
 echo ==========================================
-echo Program exit code: !EXIT_CODE!
+echo Exit code: %errorlevel%
 echo ==========================================
 echo.
 
-if not "!EXIT_CODE!"=="0" (
-    echo [ERROR] 프로그램이 오류와 함께 종료되었습니다.
-    echo 위의 오류 내용을 확인하세요.
-) else (
-    echo 프로그램이 정상 종료되었습니다.
-)
-
-:TEST_MODE
-echo Testing Python runtime...
-if defined PYTHON_EXE (
-    "!PYTHON_EXE!" --version
-    if errorlevel 1 goto TEST_FAILED
-    "!PYTHON_EXE!" -m py_compile "%~dp0app.py"
-) else (
-    "!PYTHON_LAUNCHER!" -3 --version
-    if errorlevel 1 goto TEST_FAILED
-    "!PYTHON_LAUNCHER!" -3 -m py_compile "%~dp0app.py"
-)
-if errorlevel 1 goto TEST_FAILED
-echo [PASS] Python and app.py checks passed.
-set "EXIT_CODE=0"
-goto FINISH
-
-:TEST_FAILED
-echo [FAIL] Python/app.py test failed.
-set "EXIT_CODE=1"
-goto FINISH
-
-:FINISH
-echo.
-echo 이 창을 닫으려면 아무 키나 누르세요...
+:END
+echo Press any key to close this window...
 pause >nul
 exit /b 0
