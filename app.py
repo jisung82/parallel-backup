@@ -1802,45 +1802,121 @@ class ParallelBackupApp:
                 results.append(("다름",rel,left["size"],right["size"]))
         return results
 
-    def _set_compare_timeline(self, stage, reset=False, error=False, success=False):
-        steps=[
-            ("원본 스캔","folder"),
-            ("백업 스캔","folder"),
-            ("파일 비교","compare"),
-            ("변경 분석","list"),
-            ("결과 정리","refresh"),
-            ("보고서","report"),
-            ("완료","flag"),
+    def _draw_compare_timeline(self, _event=None):
+        state = getattr(
+            self,
+            "compare_timeline_state",
+            (0, False, False, True),
+        )
+        stage, error, success, _reset = state
+        steps = [
+            ("원본 스캔", "folder"),
+            ("백업 스캔", "folder"),
+            ("파일 비교", "compare"),
+            ("변경 분석", "list"),
+            ("결과 정리", "refresh"),
+            ("보고서", "report"),
+            ("완료", "flag"),
         ]
-        self.compare_timeline_state=(stage,error,success,reset)
-        def draw():
-            canvas=self.compare_timeline_canvas
-            canvas.delete("all")
-            width=max(700,canvas.winfo_width())
-            left=55
-            right=width-55
-            y=35
-            gap=(right-left)/max(1,len(steps)-1)
-            for i in range(len(steps)-1):
-                color="#0F9D96" if success or i<stage else "#CBD5E1"
-                canvas.create_line(left+gap*i+22,y,right if i==len(steps)-2 else left+gap*(i+1)-22,y,fill=color,width=3)
-            for i,(label,icon) in enumerate(steps):
-                x=left+gap*i
-                active=i==stage and not success and not error
-                done=success or i<stage
-                err=error and i==stage
-                fill="#EF4444" if err else ("#0F9D96" if done else ("#4F46E5" if active else "#F8FAFC"))
-                outline=fill if fill!="#F8FAFC" else "#CBD5E1"
-                canvas.create_oval(x-21,y-21,x+21,y+21,fill=fill,outline=outline,width=2)
-                canvas.create_text(x,y,text="✓" if done else ("×" if err else ("⌕" if icon=="compare" else "●")),
-                                  fill="#FFFFFF" if fill!="#F8FAFC" else "#94A3B8",
-                                  font=(self.font_family,10,"bold"))
-                canvas.create_text(x,72,text=f"{i+1}. {label}",fill="#0F172A" if done or active else "#64748B",
-                                  font=(self.font_family,8,"bold"))
-                canvas.create_text(x,93,text="완료" if done else ("오류" if err else ("진행 중..." if active else "대기 중")),
-                                  fill="#0F9D96" if done else ("#EF4444" if err else ("#4F46E5" if active else "#94A3B8")),
-                                  font=(self.font_family,8))
-        self.root.after(0,draw)
+
+        canvas = self.compare_timeline_canvas
+        canvas.delete("all")
+        width = max(700, canvas.winfo_width())
+        left = 55
+        right = width - 55
+        y = 35
+        gap = (right - left) / max(1, len(steps) - 1)
+
+        for i in range(len(steps) - 1):
+            color = "#0F9D96" if success or i < stage else "#CBD5E1"
+            x1 = left + gap * i + 22
+            x2 = left + gap * (i + 1) - 22
+            canvas.create_line(
+                x1,
+                y,
+                x2,
+                y,
+                fill=color,
+                width=3,
+            )
+
+        for i, (label, icon) in enumerate(steps):
+            x = left + gap * i
+            active = i == stage and not success and not error
+            done = success or i < stage
+            err = error and i == stage
+
+            fill = (
+                "#EF4444"
+                if err
+                else "#0F9D96"
+                if done
+                else "#4F46E5"
+                if active
+                else "#F8FAFC"
+            )
+            outline = fill if fill != "#F8FAFC" else "#CBD5E1"
+
+            canvas.create_oval(
+                x - 21,
+                y - 21,
+                x + 21,
+                y + 21,
+                fill=fill,
+                outline=outline,
+                width=2,
+            )
+
+            icon_text = (
+                "✓"
+                if done
+                else "×"
+                if err
+                else "⌕"
+                if icon == "compare"
+                else "●"
+            )
+            canvas.create_text(
+                x,
+                y,
+                text=icon_text,
+                fill="#FFFFFF" if fill != "#F8FAFC" else "#94A3B8",
+                font=(self.font_family, 10, "bold"),
+            )
+            canvas.create_text(
+                x,
+                72,
+                text=f"{i + 1}. {label}",
+                fill="#0F172A" if done or active else "#64748B",
+                font=(self.font_family, 8, "bold"),
+            )
+            canvas.create_text(
+                x,
+                93,
+                text=(
+                    "완료"
+                    if done
+                    else "오류"
+                    if err
+                    else "진행 중..."
+                    if active
+                    else "대기 중"
+                ),
+                fill=(
+                    "#0F9D96"
+                    if done
+                    else "#EF4444"
+                    if err
+                    else "#4F46E5"
+                    if active
+                    else "#94A3B8"
+                ),
+                font=(self.font_family, 8),
+            )
+
+    def _set_compare_timeline(self, stage, reset=False, error=False, success=False):
+        self.compare_timeline_state = (stage, error, success, reset)
+        self.root.after(0, self._draw_compare_timeline)
 
     def _start_compare_timer(self):
         self._stop_compare_timer()
