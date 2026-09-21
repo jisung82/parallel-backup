@@ -1926,10 +1926,10 @@ class ParallelBackupApp:
             self.timeline_steps = [
                 ("원본 분석", "scan"),
                 ("파일 목록 생성", "files"),
-                ("백업 복사", "copy"),
-                ("무결성 검사", "check"),
+                ("스냅샷 구성", "copy"),
                 ("압축 (ZIP)", "zip"),
-                ("최종 검증", "shield"),
+                ("ZIP 검증", "shield"),
+                ("병렬 복사", "copy"),
                 ("완료", "flag"),
             ]
             self._refresh_header()
@@ -2620,6 +2620,8 @@ class ParallelBackupApp:
         deep_scan: bool,
         hardlink: bool,
     ):
+        master_archive = None
+        staging_root = None
         try:
             source_data = build_source_manifest(
                 source,
@@ -2643,12 +2645,9 @@ class ParallelBackupApp:
 
             expected_ops = max(
                 1,
-                (
-                    file_count
-                    + file_count * (2 if deep_scan else 1)
-                    + 1
-                )
-                * len(destinations),
+                file_count * (3 if not deep_scan else 4)
+                + len(destinations) * (2 if deep_scan else 1)
+                + 10,
             )
             self.set_progress(
                 value=0,
@@ -2657,27 +2656,56 @@ class ParallelBackupApp:
             )
             self._set_timeline_stage(1)
 
+            self._set_operation("백업 스냅샷 구성 중...")
+            self._set_timeline_stage(2)
+
+            master_archive, archive_name, staging_root, archive_manifest = (
+                self._build_master_zip(
+                    source=source,
+                    base_name=base_name,
+                    destinations=destinations,
+                    source_data=source_data,
+                    incremental=incremental,
+                    deep_scan=deep_scan,
+                    hardlink=hardlink,
+                    exclude_patterns=exclude_patterns,
+                )
+            )
+
+            if self.cancel_event.is_set():
+                raise RuntimeError("백업이 취소되었습니다.")
+
+            self._set_operation(f"검증된 ZIP 준비 완료 · {archive_name}")
+            self._set_timeline_stage(4)
+
+            archive_size = master_archive.stat().st_size
+            master_sha256 = sha256_file(master_archive) if deep_scan else None
+
+            self.write_log(
+                f"[MASTER ZIP] {archive_name} "
+                f"size={archive_size / (1024**3):.2f} GB"
+            )
+
             workers = min(parallel, len(destinations))
             results = []
 
             self._set_operation(
-                f"백업 복사 중 · {len(destinations)}개 대상 병렬 처리"
+                f"ZIP 병렬 복사 중 · {len(destinations)}개 대상"
             )
-            self._set_timeline_stage(2)
+            self._set_timeline_stage(5)
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_map = {
                     executor.submit(
-                        self.backup_one_destination,
-                        source,
-                        name,
+                        self._copy_master_archive,
+                        master_archive,
+                        archive_name,
                         destination,
-                        source_data,
+                        source,
+                        base_name + "_",
                         keep,
-                        incremental,
                         deep_scan,
-                        hardlink,
-                        exclude_patterns,
+                        master_sha256,
                     ): destination
                     for destination in destinations
                 }
@@ -2692,7 +2720,7 @@ class ParallelBackupApp:
             failed = len(results) - success
 
             self.write_log(
-                f"[SUMMARY] success={success} failed={failed}"
+                f"[SUMMARY] ZIP copied={success} failed={failed}"
             )
 
             def finish():
@@ -2704,29 +2732,34 @@ class ParallelBackupApp:
 
                 if failed == 0:
                     self._set_timeline_stage(6, success=True)
-                    self.status_var.set(f"완료 · {success}/{len(results)}개 대상")
+                    self.status_var.set(
+                        f"완료 · ZIP {success}/{len(results)}개 대상"
+                    )
                     self._refresh_header()
                     show_windows_notification(
                         "Parallel Backup · 백업 완료",
-                        f"{success}개 경로 백업 완료 · {elapsed_text}",
+                        f"{success}개 대상에 ZIP 복사 완료 · {elapsed_text}",
                     )
                     messagebox.showinfo(
                         "백업 완료",
-                        f"{success}개 경로 백업 완료\n소요 시간: {elapsed_text}",
+                        f"압축 후 ZIP 복사가 완료되었습니다.\n"
+                        f"대상: {success}개\n"
+                        f"소요 시간: {elapsed_text}",
                     )
                 else:
-                    self._set_timeline_stage(self.timeline_current, error=True)
+                    self._set_timeline_stage(5, error=True)
                     self.status_var.set(
                         f"완료 · {success} 성공 / {failed} 실패"
                     )
                     self._refresh_header()
                     show_windows_notification(
                         "Parallel Backup · 백업 결과",
-                        f"성공 {success} / 실패 {failed} · {elapsed_text}",
+                        f"ZIP 복사 성공 {success} / 실패 {failed} · {elapsed_text}",
                     )
                     messagebox.showwarning(
                         "백업 결과",
-                        f"성공: {success}\n실패: {failed}\n소요 시간: {elapsed_text}\n로그를 확인하세요.",
+                        f"성공: {success}\n실패: {failed}\n"
+                        f"소요 시간: {elapsed_text}\n로그를 확인하세요.",
                     )
 
             self.root.after(0, finish)
@@ -2741,16 +2774,318 @@ class ParallelBackupApp:
                 self.cancel_button.configure(state="disabled")
                 elapsed_text = self._format_elapsed(self.last_elapsed_seconds)
                 self._stop_operation_timer()
-                self._set_timeline_stage(self.timeline_current, error=True)
+                self._set_timeline_stage(
+                    max(0, self.timeline_current),
+                    error=True,
+                )
                 self.status_var.set(f"실패 · {elapsed_text}")
                 self._refresh_header()
                 show_windows_notification(
                     "Parallel Backup · 백업 실패",
                     f"{error_text} · {elapsed_text}",
                 )
-                messagebox.showerror("백업 실패", f"{error_text}\n\n소요 시간: {elapsed_text}")
+                messagebox.showerror(
+                    "백업 실패",
+                    f"{error_text}\n\n소요 시간: {elapsed_text}",
+                )
 
             self.root.after(0, finish_error)
+
+        finally:
+            if master_archive is not None:
+                try:
+                    Path(master_archive).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if staging_root is not None:
+                shutil.rmtree(staging_root, ignore_errors=True)
+
+    def _build_master_zip(
+        self,
+        source: Path,
+        base_name: str,
+        destinations: list[Path],
+        source_data: dict,
+        incremental: bool,
+        deep_scan: bool,
+        hardlink: bool,
+        exclude_patterns,
+    ):
+        archive_name = make_unique_archive_name(
+            destinations,
+            f"{base_name}.zip",
+        )
+
+        staging_root = Path(
+            tempfile.mkdtemp(prefix="parallel-backup-stage-")
+        )
+
+        previous_dir = None
+        previous_manifest = None
+        previous_archive = None
+
+        if incremental and destinations:
+            first_destination = destinations[0]
+            previous_archive, previous_manifest = find_latest_verified_archive(
+                first_destination,
+                f"{base_name.split('_')[0]}_",
+                source,
+            )
+
+            if previous_archive is None:
+                previous_dir, legacy_manifest = find_latest_verified_backup(
+                    first_destination,
+                    f"{base_name.split('_')[0]}_",
+                    source,
+                )
+                if previous_dir is not None:
+                    previous_manifest = legacy_manifest
+
+        if previous_archive is not None:
+            self.write_log(
+                f"[INCREMENTAL] 기준 ZIP: {previous_archive.name}"
+            )
+            with zipfile.ZipFile(previous_archive, "r") as archive:
+                archive.extractall(staging_root)
+        elif previous_dir is not None:
+            self.write_log(
+                f"[INCREMENTAL] 레거시 스냅샷 기준: {previous_dir.name}"
+            )
+            shutil.copytree(
+                previous_dir,
+                staging_root,
+                dirs_exist_ok=True,
+            )
+        else:
+            self.write_log("[INCREMENTAL] 기준 백업 없음 → 전체 구성")
+
+        if self.cancel_event.is_set():
+            raise RuntimeError("백업이 취소되었습니다.")
+
+        previous_files = (
+            previous_manifest.get("files", {})
+            if previous_manifest else {}
+        )
+
+        current_paths = set(source_data["files"])
+
+        # Remove the old manifest and files that no longer exist in the source.
+        old_manifest_dir = staging_root / MANIFEST_DIR
+        if old_manifest_dir.exists():
+            shutil.rmtree(old_manifest_dir, ignore_errors=True)
+
+        for staged_file in list(staging_root.rglob("*")):
+            if not staged_file.is_file():
+                continue
+            rel = staged_file.relative_to(staging_root).as_posix()
+            if rel not in current_paths:
+                try:
+                    staged_file.unlink()
+                except OSError:
+                    pass
+
+        copied = 0
+        reused = 0
+
+        for rel, info in source_data["files"].items():
+            if self.cancel_event.is_set():
+                raise RuntimeError("백업이 취소되었습니다.")
+
+            src = source / Path(rel)
+            dst = staging_root / Path(rel)
+            old_info = previous_files.get(rel)
+            can_reuse = bool(
+                incremental
+                and old_info
+                and dst.is_file()
+                and old_info.get("size") == info["size"]
+                and old_info.get("mtime_ns") == info["mtime_ns"]
+                and old_info.get("ctime_ns") == info["ctime_ns"]
+                and (
+                    not deep_scan
+                    or old_info.get("sha256") == info["sha256"]
+                )
+            )
+
+            if can_reuse:
+                reused += 1
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                copied += 1
+
+            self.advance_progress()
+
+        manifest = {
+            "version": 4,
+            "app_version": APP_VERSION,
+            "source": str(source.resolve()),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "verified": False,
+            "verification": "sha256" if deep_scan else "fast",
+            "backup_name": Path(archive_name).stem,
+            "archive_name": archive_name,
+            "exclude_patterns": exclude_patterns,
+            "files": source_data["files"],
+            "directories": source_data["directories"],
+            "stats": {
+                "files": len(source_data["files"]),
+                "copied": copied,
+                "reused": reused,
+                "source_bytes": sum(
+                    item["size"] for item in source_data["files"].values()
+                ),
+            },
+        }
+
+        write_manifest(staging_root, manifest)
+
+        self.write_log(
+            f"[STAGE] copied={copied:,} reused={reused:,}"
+        )
+
+        self._set_operation("스냅샷 무결성 검사 중...")
+        self._set_timeline_stage(2)
+
+        if deep_scan:
+            verify_snapshot_sha256(
+                staging_root,
+                manifest,
+                self.advance_progress,
+                self.cancel_event,
+            )
+        else:
+            verify_snapshot_fast(
+                source,
+                staging_root,
+                manifest,
+                self.advance_progress,
+                self.cancel_event,
+            )
+
+        manifest["verified"] = True
+        write_manifest(staging_root, manifest)
+
+        if self.cancel_event.is_set():
+            raise RuntimeError("백업이 취소되었습니다.")
+
+        archive_path = Path(
+            tempfile.mkstemp(
+                prefix="parallel-backup-master-",
+                suffix=".zip",
+            )[1]
+        )
+
+        self._set_operation(f"ZIP 압축 중 · {archive_name}")
+        self._set_timeline_stage(3)
+        create_zip_archive(
+            staging_root,
+            archive_path,
+            self.advance_progress,
+            self.cancel_event,
+        )
+
+        self._set_operation(f"ZIP 무결성 검사 중 · {archive_name}")
+        self._set_timeline_stage(4)
+        verify_zip_archive(
+            archive_path,
+            manifest,
+            self.advance_progress,
+            self.cancel_event,
+            deep_scan,
+        )
+
+        self.write_log(
+            f"[ZIP READY] {archive_name} · "
+            f"{archive_path.stat().st_size / (1024**3):.2f} GB"
+        )
+
+        return archive_path, archive_name, staging_root, manifest
+
+    def _copy_master_archive(
+        self,
+        master_archive: Path,
+        archive_name: str,
+        destination: Path,
+        source: Path,
+        prefix: str,
+        keep: int,
+        deep_scan: bool,
+        master_sha256: str | None,
+    ):
+        destination.mkdir(parents=True, exist_ok=True)
+        cleanup_stale_partials(destination)
+
+        target = destination / archive_name
+        partial = destination / (
+            f".parallel-backup.partial-{uuid.uuid4().hex}.zip"
+        )
+
+        try:
+            required_bytes = master_archive.stat().st_size
+            ensure_free_space(destination, required_bytes)
+
+            self.write_log(
+                f"[COPY] {master_archive.name} -> {destination}"
+            )
+
+            shutil.copy2(master_archive, partial)
+            self.advance_progress()
+
+            if partial.stat().st_size != master_archive.stat().st_size:
+                raise IOError(
+                    f"ZIP 크기 불일치: {destination}"
+                )
+
+            if deep_scan:
+                copied_sha256 = sha256_file(partial)
+                if copied_sha256 != master_sha256:
+                    raise IOError(
+                        f"ZIP SHA-256 불일치: {destination}"
+                    )
+
+            os.replace(partial, target)
+            self.advance_progress()
+
+            archives = list_verified_archives(
+                destination,
+                prefix,
+                source,
+            )
+            for old_archive, _ in archives[keep:]:
+                try:
+                    old_archive.unlink()
+                    self.write_log(
+                        f"[RETENTION] 삭제: {old_archive.name}"
+                    )
+                except OSError as exc:
+                    self.write_log(
+                        f"[RETENTION FAIL] {old_archive.name} -> {exc}"
+                    )
+
+            self.write_log(
+                f"[COPY OK] {destination} -> {target.name}"
+            )
+            return {
+                "ok": True,
+                "destination": str(destination),
+                "archive": str(target),
+            }
+
+        except Exception as exc:
+            try:
+                partial.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+            self.write_log(
+                f"[COPY FAIL] {destination} -> {exc}"
+            )
+            return {
+                "ok": False,
+                "destination": str(destination),
+                "error": str(exc),
+            }
 
     def backup_one_destination(
         self,
