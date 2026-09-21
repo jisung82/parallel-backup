@@ -674,8 +674,8 @@ class ParallelBackupApp:
 
         self.header_mode_buttons = {}
         for mode_key, label in [
-            ("일반 백업", "일반"),
-            ("정밀 검사 백업", "정밀 검사"),
+            ("일반 백업", "일반 백업"),
+            ("정밀 검사 백업", "정밀 검사 백업"),
         ]:
             button = tk.Button(
                 segment_shell,
@@ -696,7 +696,7 @@ class ParallelBackupApp:
             0, 0,
             window=self.header_mode_frame,
             anchor="nw",
-            width=152,
+            width=210,
         )
 
         def draw(event=None):
@@ -774,7 +774,7 @@ class ParallelBackupApp:
 
             canvas.coords(
                 self.header_mode_window,
-                width - 190,
+                width - 238,
                 20,
             )
             self.header_mode_frame.configure(
@@ -1310,43 +1310,7 @@ class ParallelBackupApp:
         self.save_profile(silent=True)
 
     def _refresh_backup_mode_segment(self):
-        if not hasattr(self, "mode_buttons"):
-            return
-
-        active = self.backup_mode_var.get()
-        for mode, button in self.mode_buttons.items():
-            if mode == active:
-                selected_color = (
-                    self.colors["danger"]
-                    if mode == "정밀 검사 백업"
-                    else self.colors["primary"]
-                )
-                selected_active = (
-                    self.colors["danger_dark"]
-                    if mode == "정밀 검사 백업"
-                    else self.colors["primary_dark"]
-                )
-                button.configure(
-                    bg=selected_color,
-                    fg="#FFFFFF",
-                    activebackground=selected_active,
-                    activeforeground="#FFFFFF",
-                )
-            else:
-                button.configure(
-                    bg=self.colors["surface"],
-                    fg=self.colors["muted"],
-                    activebackground=(
-                        "#FEF2F2"
-                        if mode == "정밀 검사 백업"
-                        else self.colors["soft_indigo"]
-                    ),
-                    activeforeground=(
-                        self.colors["danger_dark"]
-                        if mode == "정밀 검사 백업"
-                        else self.colors["primary_dark"]
-                    ),
-                )
+        self._refresh_header_segment_colors()
 
     def _refresh_metrics(self):
         if hasattr(self, "metric_targets"):
