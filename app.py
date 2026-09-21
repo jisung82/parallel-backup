@@ -14,6 +14,7 @@ APP_TITLE = "Parallel Backup"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
+SOURCE_CACHE_FILE = "source_cache.json"
 
 
 def sha256_file(path: Path) -> str:
@@ -24,9 +25,44 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build_source_manifest(source: Path):
+def source_cache_path() -> Path:
+    base = os.environ.get("LOCALAPPDATA")
+    if not base:
+        base = str(Path.home() / "AppData" / "Local")
+    path = Path(base) / "ParallelBackup"
+    path.mkdir(parents=True, exist_ok=True)
+    return path / SOURCE_CACHE_FILE
+
+
+def load_source_cache() -> dict:
+    path = source_cache_path()
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "sources": {}}
+
+
+def save_source_cache(cache: dict):
+    path = source_cache_path()
+    temp_path = path.with_suffix(".tmp")
+    temp_path.write_text(
+        json.dumps(cache, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.replace(temp_path, path)
+
+
+def build_source_manifest(source: Path, use_cache: bool = True):
     files = {}
     directories = []
+    cache_hits = 0
+    cache_misses = 0
+
+    cache = load_source_cache() if use_cache else {"version": 1, "sources": {}}
+    source_key = str(source.resolve())
+    cached_files = cache.setdefault("sources", {}).setdefault(source_key, {}).get(
+        "files", {}
+    )
 
     for root, dirnames, filenames in os.walk(source):
         root_path = Path(root)
@@ -38,13 +74,44 @@ def build_source_manifest(source: Path):
             src = root_path / filename
             rel = src.relative_to(source).as_posix()
             stat = src.stat()
+
+            cached = cached_files.get(rel)
+            cache_valid = bool(
+                use_cache
+                and cached
+                and cached.get("sha256")
+                and cached.get("size") == stat.st_size
+                and cached.get("mtime_ns") == stat.st_mtime_ns
+                and cached.get("ctime_ns") == stat.st_ctime_ns
+            )
+
+            if cache_valid:
+                file_hash = cached["sha256"]
+                cache_hits += 1
+            else:
+                file_hash = sha256_file(src)
+                cache_misses += 1
+
             files[rel] = {
-                "sha256": sha256_file(src),
+                "sha256": file_hash,
                 "size": stat.st_size,
                 "mtime_ns": stat.st_mtime_ns,
+                "ctime_ns": stat.st_ctime_ns,
             }
 
-    return {"files": files, "directories": sorted(set(directories))}
+    if use_cache:
+        cache["sources"][source_key] = {
+            "files": files,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        save_source_cache(cache)
+
+    return {
+        "files": files,
+        "directories": sorted(set(directories)),
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
+    }
 
 
 def find_latest_verified_backup(destination: Path, backup_name_prefix: str, source: Path):
@@ -144,6 +211,7 @@ class ParallelBackupApp:
         self.name_var = tk.StringVar(value="backup")
         self.incremental_var = tk.BooleanVar(value=True)
         self.verify_var = tk.BooleanVar(value=True)
+        self.cache_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="대기 중")
 
         self.destinations = []
@@ -195,6 +263,11 @@ class ParallelBackupApp:
             options,
             text="SHA-256 무결성 검사",
             variable=self.verify_var,
+        ).pack(anchor="w", padx=8, pady=(4, 4))
+        ttk.Checkbutton(
+            options,
+            text="빠른 해시 캐시 사용 (크기/수정시간이 같은 파일의 SHA-256 재사용)",
+            variable=self.cache_var,
         ).pack(anchor="w", padx=8, pady=(4, 8))
 
         dest_box = ttk.LabelFrame(outer, text="백업 대상 경로")
@@ -419,6 +492,7 @@ class ParallelBackupApp:
         backup_name = f"{name}_{datetime.now().strftime(TIMESTAMP_FORMAT)}"
         verify = self.verify_var.get()
         incremental = self.incremental_var.get()
+        use_cache = self.cache_var.get()
 
         self.running = True
         self.cancel_event.clear()
@@ -434,10 +508,19 @@ class ParallelBackupApp:
         self.write_log(f"[TARGETS] {len(destinations)}개")
         self.write_log(f"[INCREMENTAL] {'ON' if incremental else 'OFF'}")
         self.write_log(f"[VERIFY] {'ON' if verify else 'OFF'}")
+        self.write_log(f"[HASH CACHE] {'ON' if use_cache else 'OFF'}")
 
         threading.Thread(
             target=self.run_backup,
-            args=(source, destinations, backup_name, name, incremental, verify),
+            args=(
+                source,
+                destinations,
+                backup_name,
+                name,
+                incremental,
+                verify,
+                use_cache,
+            ),
             daemon=True,
         ).start()
 
@@ -449,14 +532,19 @@ class ParallelBackupApp:
         backup_name_base: str,
         incremental: bool,
         verify: bool,
+        use_cache: bool,
     ):
         try:
-            self.write_log("[SCAN] 원본 파일 SHA-256 계산 시작")
-            source_data = build_source_manifest(source)
+            self.write_log("[SCAN] 원본 파일 목록 및 SHA-256 준비 시작")
+            source_data = build_source_manifest(source, use_cache=use_cache)
             if self.cancel_event.is_set():
                 raise RuntimeError("백업이 취소되었습니다.")
             files_count = len(source_data["files"])
-            self.write_log(f"[SCAN] 파일 {files_count:,}개 해시 완료")
+            self.write_log(
+                f"[SCAN] 파일 {files_count:,}개 준비 완료 | "
+                f"cache_hits={source_data['cache_hits']:,}, "
+                f"cache_misses={source_data['cache_misses']:,}"
+            )
 
             operations_per_destination = files_count * (2 if verify else 1)
             self.set_progress(
@@ -610,6 +698,8 @@ class ParallelBackupApp:
                     "files": len(source_data["files"]),
                     "copied": copied,
                     "reused": reused,
+                    "hash_cache_hits": source_data["cache_hits"],
+                    "hash_cache_misses": source_data["cache_misses"],
                 },
             }
 
