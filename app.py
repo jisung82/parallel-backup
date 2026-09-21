@@ -2835,7 +2835,7 @@ class ParallelBackupApp:
             if previous_archive is None:
                 previous_dir, legacy_manifest = find_latest_verified_backup(
                     first_destination,
-                    f"{base_name.split('_')[0]}_",
+                    f"{base_name.rsplit('_', 2)[0]}_",
                     source,
                 )
                 if previous_dir is not None:
