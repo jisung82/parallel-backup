@@ -205,7 +205,7 @@ def list_verified_snapshots(destination: Path, prefix: str, source: Path):
         if not manifest:
             continue
         if (
-            manifest.get("version") == 3
+            manifest.get("version") in (2, 3)
             and manifest.get("source") == source_text
             and manifest.get("verified") is True
         ):
@@ -618,6 +618,11 @@ class ParallelBackupApp:
         base_name = f"{name}_{datetime.now().strftime(TIMESTAMP_FORMAT)}"
 
         self.save_profile(silent=True)
+        incremental = self.incremental_var.get()
+        verify = self.verify_var.get()
+        use_cache = self.cache_var.get()
+        hardlink = self.hardlink_var.get()
+
         self.running = True
         self.cancel_event.clear()
         self.backup_button.configure(state="disabled")
@@ -632,10 +637,10 @@ class ParallelBackupApp:
         self.write_log(f"[NAME] {base_name}")
         self.write_log(f"[KEEP] {keep}")
         self.write_log(
-            f"[OPTIONS] incremental={self.incremental_var.get()} "
-            f"verify={self.verify_var.get()} "
-            f"cache={self.cache_var.get()} "
-            f"hardlink={self.hardlink_var.get()}"
+            f"[OPTIONS] incremental={incremental} "
+            f"verify={verify} "
+            f"cache={use_cache} "
+            f"hardlink={hardlink}"
         )
         self.write_log(
             f"[EXCLUDE] {', '.join(exclude_patterns) if exclude_patterns else '(없음)'}"
@@ -650,6 +655,10 @@ class ParallelBackupApp:
                 parallel,
                 keep,
                 exclude_patterns,
+                incremental,
+                verify,
+                use_cache,
+                hardlink,
             ),
             daemon=True,
         ).start()
@@ -662,11 +671,15 @@ class ParallelBackupApp:
         parallel: int,
         keep: int,
         exclude_patterns,
+        incremental: bool,
+        verify: bool,
+        use_cache: bool,
+        hardlink: bool,
     ):
         try:
             source_data = build_source_manifest(
                 source,
-                use_cache=self.cache_var.get(),
+                use_cache=use_cache,
                 exclude_patterns=exclude_patterns,
             )
             if self.cancel_event.is_set():
@@ -686,7 +699,7 @@ class ParallelBackupApp:
 
             expected_ops = max(
                 1,
-                (file_count * (2 if self.verify_var.get() else 1))
+                (file_count * (2 if verify else 1))
                 * len(destinations),
             )
             self.set_progress(
@@ -707,6 +720,9 @@ class ParallelBackupApp:
                         destination,
                         source_data,
                         keep,
+                        incremental,
+                        verify,
+                        hardlink,
                     ): destination
                     for destination in destinations
                 }
@@ -764,7 +780,11 @@ class ParallelBackupApp:
         destination: Path,
         source_data: dict,
         keep: int,
+        incremental: bool,
+        verify: bool,
+        hardlink: bool,
     ):
+        destination.mkdir(parents=True, exist_ok=True)
         cleanup_stale_partials(destination)
         backup_name = make_unique_backup_name(
             destination,
@@ -800,8 +820,8 @@ class ParallelBackupApp:
                 old_info = previous_files.get(rel)
                 old_file = previous_dir / Path(rel) if previous_dir else None
                 can_reuse = bool(
-                    self.incremental_var.get()
-                    and self.hardlink_var.get()
+                    incremental
+                    and hardlink
                     and old_info
                     and old_file
                     and old_file.is_file()
@@ -848,7 +868,7 @@ class ParallelBackupApp:
                     src,
                     dst,
                     old_file if can_reuse else None,
-                    self.hardlink_var.get() and can_reuse,
+                    hardlink and can_reuse,
                 )
 
                 if operation == "hardlink":
@@ -880,7 +900,7 @@ class ParallelBackupApp:
 
             write_manifest(partial_target, manifest)
 
-            if self.verify_var.get():
+            if verify:
                 self.write_log(f"[VERIFY] {destination}")
                 verify_snapshot(
                     partial_target,
@@ -934,10 +954,14 @@ class ParallelBackupApp:
         backup = Path(backup_text).resolve()
         manifest = read_manifest(backup)
 
-        if not manifest or manifest.get("version") != 3 or manifest.get("verified") is not True:
+        if (
+            not manifest
+            or manifest.get("version") not in (2, 3)
+            or manifest.get("verified") is not True
+        ):
             messagebox.showerror(
                 "복구 오류",
-                "검증 완료된 v3 백업 스냅샷이 아닙니다.",
+                "검증 완료된 v2/v3 백업 스냅샷이 아닙니다.",
             )
             return
 
