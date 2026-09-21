@@ -395,6 +395,19 @@ class ParallelBackupApp:
         self.elapsed_job = None
         self.last_elapsed_seconds = 0
 
+        self.timeline_steps = [
+            ("원본 분석", "scan"),
+            ("파일 목록 생성", "files"),
+            ("백업 복사", "copy"),
+            ("무결성 검사", "check"),
+            ("압축 (ZIP)", "zip"),
+            ("최종 검증", "shield"),
+            ("완료", "flag"),
+        ]
+        self.timeline_current = -1
+        self.timeline_error = False
+        self.timeline_success = False
+
         self.destinations = []
         self.running = False
         self.cancel_event = threading.Event()
@@ -681,8 +694,8 @@ class ParallelBackupApp:
 
         self.header_mode_buttons = {}
         for mode_key, label in [
-            ("일반 백업", "일반 백업"),
-            ("정밀 검사 백업", "정밀 검사 백업"),
+            ("일반 백업", "일반"),
+            ("정밀 검사 백업", "정밀 검사"),
         ]:
             button = tk.Button(
                 segment_shell,
@@ -703,7 +716,7 @@ class ParallelBackupApp:
             0, 0,
             window=self.header_mode_frame,
             anchor="nw",
-            width=210,
+            width=152,
         )
 
         def draw(event=None):
@@ -781,7 +794,7 @@ class ParallelBackupApp:
 
             canvas.coords(
                 self.header_mode_window,
-                width - 238,
+                width - 190,
                 20,
             )
             self.header_mode_frame.configure(
@@ -1255,6 +1268,19 @@ class ParallelBackupApp:
         )
         self.progress.pack(fill="x")
 
+        timeline_wrapper, timeline_card = self._card(content, padding=12)
+        timeline_wrapper.pack(fill="x", pady=(0, 9))
+        self.timeline_canvas = tk.Canvas(
+            timeline_card,
+            height=132,
+            bg=self.colors["surface"],
+            highlightthickness=0,
+            bd=0,
+        )
+        self.timeline_canvas.pack(fill="x")
+        self.timeline_canvas.bind("<Configure>", self._draw_timeline)
+        self.root.after_idle(self._draw_timeline)
+
         log_wrapper, log_card = self._card(content, padding=13)
         log_wrapper.pack(fill="both", expand=True)
         ttk.Label(
@@ -1317,7 +1343,43 @@ class ParallelBackupApp:
         self.save_profile(silent=True)
 
     def _refresh_backup_mode_segment(self):
-        self._refresh_header_segment_colors()
+        if not hasattr(self, "mode_buttons"):
+            return
+
+        active = self.backup_mode_var.get()
+        for mode, button in self.mode_buttons.items():
+            if mode == active:
+                selected_color = (
+                    self.colors["danger"]
+                    if mode == "정밀 검사 백업"
+                    else self.colors["primary"]
+                )
+                selected_active = (
+                    self.colors["danger_dark"]
+                    if mode == "정밀 검사 백업"
+                    else self.colors["primary_dark"]
+                )
+                button.configure(
+                    bg=selected_color,
+                    fg="#FFFFFF",
+                    activebackground=selected_active,
+                    activeforeground="#FFFFFF",
+                )
+            else:
+                button.configure(
+                    bg=self.colors["surface"],
+                    fg=self.colors["muted"],
+                    activebackground=(
+                        "#FEF2F2"
+                        if mode == "정밀 검사 백업"
+                        else self.colors["soft_indigo"]
+                    ),
+                    activeforeground=(
+                        self.colors["danger_dark"]
+                        if mode == "정밀 검사 백업"
+                        else self.colors["primary_dark"]
+                    ),
+                )
 
     def _refresh_metrics(self):
         if hasattr(self, "metric_targets"):
@@ -1530,6 +1592,239 @@ class ParallelBackupApp:
     def _set_operation(self, status):
         self.root.after(0, lambda: self.status_var.set(status))
 
+    def _timeline_palette(self):
+        precision = self.backup_mode_var.get() == "정밀 검사 백업"
+        active = self.colors["danger"] if precision else self.colors["primary"]
+        active_dark = self.colors["danger_dark"] if precision else self.colors["primary_dark"]
+        return {
+            "active": active,
+            "active_dark": active_dark,
+            "success": self.colors["success"],
+            "success_soft": "#D1FAE5",
+            "pending": "#CBD5E1",
+            "pending_text": "#94A3B8",
+            "error": self.colors["danger"],
+            "error_soft": "#FEE2E2",
+            "surface": self.colors["surface"],
+            "text": self.colors["text"],
+            "muted": self.colors["muted"],
+        }
+
+    def _draw_timeline_icon(self, canvas, cx, cy, kind, color):
+        # Simple vector icons: no emoji/font dependency.
+        if kind == "scan":
+            canvas.create_circle = getattr(canvas, "create_oval")
+            canvas.create_oval(
+                cx - 9, cy - 10, cx + 5, cy + 4,
+                outline=color, width=2
+            )
+            canvas.create_line(
+                cx + 3, cy + 2, cx + 11, cy + 10,
+                fill=color, width=2
+            )
+            canvas.create_line(
+                cx - 10, cy + 11, cx - 2, cy + 3,
+                fill=color, width=2
+            )
+        elif kind == "files":
+            canvas.create_rectangle(
+                cx - 9, cy - 10, cx + 5, cy + 9,
+                outline=color, width=2
+            )
+            canvas.create_rectangle(
+                cx - 4, cy - 6, cx + 10, cy + 13,
+                outline=color, width=2
+            )
+        elif kind == "copy":
+            canvas.create_rectangle(
+                cx - 10, cy - 8, cx + 3, cy + 10,
+                outline=color, width=2
+            )
+            canvas.create_rectangle(
+                cx - 3, cy - 11, cx + 10, cy + 7,
+                outline=color, width=2
+            )
+        elif kind == "check":
+            canvas.create_oval(
+                cx - 10, cy - 10, cx + 10, cy + 10,
+                outline=color, width=2
+            )
+            canvas.create_line(
+                cx - 6, cy, cx - 1, cy + 5,
+                fill=color, width=2
+            )
+            canvas.create_line(
+                cx - 1, cy + 5, cx + 7, cy - 5,
+                fill=color, width=2
+            )
+        elif kind == "zip":
+            canvas.create_rectangle(
+                cx - 9, cy - 11, cx + 9, cy + 11,
+                outline=color, width=2
+            )
+            canvas.create_line(
+                cx - 3, cy - 7, cx - 3, cy + 7,
+                fill=color, width=2
+            )
+            canvas.create_line(
+                cx + 1, cy - 7, cx + 1, cy + 7,
+                fill=color, width=2
+            )
+        elif kind == "shield":
+            canvas.create_polygon(
+                cx, cy - 11,
+                cx + 9, cy - 6,
+                cx + 7, cy + 6,
+                cx, cy + 11,
+                cx - 7, cy + 6,
+                cx - 9, cy - 6,
+                fill="", outline=color, width=2
+            )
+            canvas.create_line(
+                cx - 5, cy, cx - 1, cy + 4,
+                fill=color, width=2
+            )
+            canvas.create_line(
+                cx - 1, cy + 4, cx + 6, cy - 4,
+                fill=color, width=2
+            )
+        elif kind == "flag":
+            canvas.create_line(
+                cx - 7, cy - 10, cx - 7, cy + 11,
+                fill=color, width=2
+            )
+            canvas.create_polygon(
+                cx - 6, cy - 9,
+                cx + 8, cy - 5,
+                cx - 6, cy + 1,
+                fill=color, outline=color
+            )
+
+    def _draw_timeline(self, _event=None):
+        if not hasattr(self, "timeline_canvas"):
+            return
+
+        canvas = self.timeline_canvas
+        canvas.delete("all")
+        width = max(700, canvas.winfo_width())
+        height = canvas.winfo_height()
+        palette = self._timeline_palette()
+
+        left = 50
+        right = width - 50
+        y = 36
+        label_y = 78
+        state_y = 103
+        count = len(self.timeline_steps)
+        gap = (right - left) / max(1, count - 1)
+
+        # Connector line first.
+        for i in range(count - 1):
+            x1 = left + gap * i
+            x2 = left + gap * (i + 1)
+            segment_color = palette["pending"]
+
+            if self.timeline_success:
+                segment_color = palette["success"]
+            elif self.timeline_error and i >= max(0, self.timeline_current - 1):
+                segment_color = palette["error"]
+            elif self.timeline_current >= 0:
+                if i < self.timeline_current:
+                    segment_color = palette["success"]
+                elif i == self.timeline_current:
+                    segment_color = palette["active"]
+
+            canvas.create_line(
+                x1 + 23, y, x2 - 23, y,
+                fill=segment_color,
+                width=3,
+                capstyle="round",
+            )
+
+        for index, (label, icon_kind) in enumerate(self.timeline_steps):
+            x = left + gap * index
+            state = "pending"
+            if self.timeline_success:
+                state = "success"
+            elif self.timeline_error and index == self.timeline_current:
+                state = "error"
+            elif self.timeline_current >= 0:
+                if index < self.timeline_current:
+                    state = "done"
+                elif index == self.timeline_current:
+                    state = "current"
+
+            if state == "success":
+                fill = palette["success"]
+                outline = palette["success"]
+                icon_color = "#FFFFFF"
+                state_text = "완료"
+                text_color = palette["success"]
+            elif state == "done":
+                fill = palette["success_soft"]
+                outline = palette["success"]
+                icon_color = palette["success"]
+                state_text = "완료"
+                text_color = palette["muted"]
+            elif state == "current":
+                fill = palette["active"]
+                outline = palette["active"]
+                icon_color = "#FFFFFF"
+                state_text = "진행 중..."
+                text_color = palette["active"]
+            elif state == "error":
+                fill = palette["error"]
+                outline = palette["error"]
+                icon_color = "#FFFFFF"
+                state_text = "오류 발생"
+                text_color = palette["error"]
+            else:
+                fill = "#F8FAFC"
+                outline = palette["pending"]
+                icon_color = palette["pending_text"]
+                state_text = "대기 중"
+                text_color = palette["pending_text"]
+
+            # Soft halo for active/final state.
+            if state in ("current", "success"):
+                halo = palette["success_soft"] if state == "success" else "#EEF2FF"
+                canvas.create_oval(
+                    x - 29, y - 29, x + 29, y + 29,
+                    fill=halo,
+                    outline="",
+                )
+
+            canvas.create_oval(
+                x - 22, y - 22, x + 22, y + 22,
+                fill=fill,
+                outline=outline,
+                width=2,
+            )
+            self._draw_timeline_icon(canvas, x, y, icon_kind, icon_color)
+
+            canvas.create_text(
+                x, label_y,
+                text=f"{index + 1}. {label}",
+                fill=palette["text"] if state not in ("pending",) else palette["muted"],
+                font=(self.font_family, 9, "bold"),
+            )
+            canvas.create_text(
+                x, state_y,
+                text=state_text,
+                fill=text_color,
+                font=(self.font_family, 8, "bold"),
+            )
+
+    def _set_timeline_stage(self, stage_index, error=False, success=False):
+        self.timeline_current = max(-1, min(len(self.timeline_steps) - 1, stage_index))
+        self.timeline_error = error
+        self.timeline_success = success
+
+        def draw():
+            self._draw_timeline()
+
+        self.root.after(0, draw)
+
     def set_progress(self, value=None, total=None, status=None):
         def update():
             if total is not None:
@@ -1553,6 +1848,7 @@ class ParallelBackupApp:
         if self.running:
             self.cancel_event.set()
             self.status_var.set("정지 요청...")
+            self._set_timeline_stage(self.timeline_current, error=True)
             self._refresh_header()
             self.write_log("[CANCEL] 취소 요청됨")
 
@@ -1620,7 +1916,7 @@ class ParallelBackupApp:
         source, name, destinations, parallel, keep = validated
         exclude_patterns = normalize_patterns(self.exclude_var.get())
 
-        snapshot_name = f"{name}_{datetime.now().strftime(TIMESTAMP_FORMAT)}"
+        base_name = f"{name}_{datetime.now().strftime(TIMESTAMP_FORMAT)}"
 
         self.save_profile(silent=True)
         incremental = self.incremental_var.get()
@@ -1638,11 +1934,12 @@ class ParallelBackupApp:
             "정밀 원본 분석 중..." if deep_scan else "원본 빠른 분석 중..."
         )
         self._refresh_header()
+        self._set_timeline_stage(0)
         self._start_operation_timer()
 
         self.write_log(f"[START] {source}")
         self.write_log(f"[TARGETS] {len(destinations)}개 | workers={parallel}")
-        self.write_log(f"[NAME] {snapshot_name}")
+        self.write_log(f"[NAME] {base_name}")
         self.write_log(f"[KEEP] {keep}")
         self.write_log(
             f"[OPTIONS] mode={self.backup_mode_var.get()} "
@@ -1658,7 +1955,6 @@ class ParallelBackupApp:
             args=(
                 source,
                 name,
-                snapshot_name,
                 destinations,
                 parallel,
                 keep,
@@ -1673,8 +1969,7 @@ class ParallelBackupApp:
     def run_backup(
         self,
         source: Path,
-        backup_prefix: str,
-        snapshot_name: str,
+        base_name: str,
         destinations: list[Path],
         parallel: int,
         keep: int,
@@ -1716,8 +2011,9 @@ class ParallelBackupApp:
             self.set_progress(
                 value=0,
                 total=expected_ops,
-                status=f"백업 준비 완료 · {file_count:,} 파일",
+                status=f"파일 목록 생성 완료 · {file_count:,} 파일",
             )
+            self._set_timeline_stage(1)
 
             workers = min(parallel, len(destinations))
             results = []
@@ -1725,14 +2021,14 @@ class ParallelBackupApp:
             self._set_operation(
                 f"백업 복사 중 · {len(destinations)}개 대상 병렬 처리"
             )
+            self._set_timeline_stage(2)
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_map = {
                     executor.submit(
                         self.backup_one_destination,
                         source,
-                        backup_prefix,
-                        snapshot_name,
+                        name,
                         destination,
                         source_data,
                         keep,
@@ -1765,6 +2061,7 @@ class ParallelBackupApp:
                 self._stop_operation_timer()
 
                 if failed == 0:
+                    self._set_timeline_stage(6, success=True)
                     self.status_var.set(f"완료 · {success}/{len(results)}개 대상")
                     self._refresh_header()
                     messagebox.showinfo(
@@ -1772,6 +2069,7 @@ class ParallelBackupApp:
                         f"{success}개 경로 백업 완료\n소요 시간: {elapsed_text}",
                     )
                 else:
+                    self._set_timeline_stage(self.timeline_current, error=True)
                     self.status_var.set(
                         f"완료 · {success} 성공 / {failed} 실패"
                     )
@@ -1784,8 +2082,7 @@ class ParallelBackupApp:
             self.root.after(0, finish)
 
         except Exception as exc:
-            error_text = str(exc)
-            self.write_log(f"[FATAL] {error_text}")
+            self.write_log(f"[FATAL] {exc}")
 
             def finish_error():
                 self.running = False
@@ -1793,17 +2090,17 @@ class ParallelBackupApp:
                 self.cancel_button.configure(state="disabled")
                 elapsed_text = self._format_elapsed(self.last_elapsed_seconds)
                 self._stop_operation_timer()
+                self._set_timeline_stage(self.timeline_current, error=True)
                 self.status_var.set(f"실패 · {elapsed_text}")
                 self._refresh_header()
-                messagebox.showerror("백업 실패", f"{error_text}\n\n소요 시간: {elapsed_text}")
+                messagebox.showerror("백업 실패", f"{exc}\n\n소요 시간: {elapsed_text}")
 
             self.root.after(0, finish_error)
 
     def backup_one_destination(
         self,
         source: Path,
-        backup_prefix: str,
-        snapshot_name: str,
+        requested_name: str,
         destination: Path,
         source_data: dict,
         keep: int,
@@ -1816,7 +2113,7 @@ class ParallelBackupApp:
         cleanup_stale_partials(destination)
         backup_name = make_unique_backup_name(
             destination,
-            snapshot_name,
+            f"{requested_name}_{datetime.now().strftime(TIMESTAMP_FORMAT)}",
         )
         final_target = destination / backup_name
         partial_target = destination / f".parallel-backup.partial-{uuid.uuid4().hex}"
@@ -1832,7 +2129,7 @@ class ParallelBackupApp:
             if incremental:
                 previous_dir, previous_manifest = find_latest_verified_backup(
                     destination,
-                    f"{backup_prefix}_",
+                    f"{requested_name}_",
                     source,
                 )
 
@@ -1943,6 +2240,7 @@ class ParallelBackupApp:
             self._set_operation(
                 f"{'정밀 무결성 검사' if deep_scan else '빠른 무결성 검사'} · {destination.name or destination}"
             )
+            self._set_timeline_stage(3)
             self.write_log(
                 f"[VERIFY] {destination} | "
                 f"{'SHA-256' if deep_scan else '빠른 검사'}"
@@ -1976,6 +2274,7 @@ class ParallelBackupApp:
             self._set_operation(
                 f"ZIP 압축 중 · {destination.name or destination}"
             )
+            self._set_timeline_stage(4)
             self.write_log(f"[ZIP] 생성 시작: {archive_target.name}")
             create_zip_archive(
                 final_target,
@@ -1987,6 +2286,7 @@ class ParallelBackupApp:
             self._set_operation(
                 f"ZIP 무결성 검사 중 · {destination.name or destination}"
             )
+            self._set_timeline_stage(5)
             self.write_log(f"[ZIP VERIFY] {archive_target.name}")
             verify_zip_archive(
                 partial_archive,
@@ -2003,7 +2303,7 @@ class ParallelBackupApp:
 
             snapshots = list_verified_snapshots(
                 destination,
-                f"{backup_prefix}_",
+                f"{requested_name}_",
                 source,
             )
             for old_snapshot, _ in snapshots[keep:]:
@@ -2092,6 +2392,7 @@ class ParallelBackupApp:
         self.progress_total = max(1, len(files) * 2)
         self.progress.configure(value=0, maximum=self.progress_total)
         self.status_var.set("복구 중...")
+        self._set_timeline_stage(2)
 
         self.write_log(f"[RESTORE] {backup}")
         self.write_log(f"[RESTORE TARGET] {target}")
@@ -2132,6 +2433,7 @@ class ParallelBackupApp:
                 self.running = False
                 self.backup_button.configure(state="normal")
                 self.cancel_button.configure(state="disabled")
+                self._set_timeline_stage(6, success=True)
                 self.status_var.set(f"복구 완료: {restored:,}개")
                 messagebox.showinfo(
                     "복구 완료",
@@ -2147,6 +2449,7 @@ class ParallelBackupApp:
                 self.running = False
                 self.backup_button.configure(state="normal")
                 self.cancel_button.configure(state="disabled")
+                self._set_timeline_stage(self.timeline_current, error=True)
                 self.status_var.set("복구 실패")
                 messagebox.showerror("복구 실패", str(exc))
 
