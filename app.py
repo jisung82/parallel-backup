@@ -1613,7 +1613,6 @@ class ParallelBackupApp:
     def _draw_timeline_icon(self, canvas, cx, cy, kind, color):
         # Simple vector icons: no emoji/font dependency.
         if kind == "scan":
-            canvas.create_circle = getattr(canvas, "create_oval")
             canvas.create_oval(
                 cx - 9, cy - 10, cx + 5, cy + 4,
                 outline=color, width=2
