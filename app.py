@@ -1224,7 +1224,6 @@ class ParallelBackupApp:
         self._build_destination_row(value)
         self._sync_destinations()
         self.save_profile(silent=True)
-        self.root.after_idle(self._autosize_window)
 
     def select_destination_row(self, entry, variable):
         path = filedialog.askdirectory(title="백업 대상 경로 선택")
@@ -1241,7 +1240,6 @@ class ParallelBackupApp:
         self._renumber_destination_rows()
         self._sync_destinations()
         self.save_profile(silent=True)
-        self.root.after_idle(self._autosize_window)
 
     def clear_destinations(self):
         for row in self.destination_rows:
@@ -1250,7 +1248,6 @@ class ParallelBackupApp:
         self.destinations.clear()
         self._refresh_metrics()
         self.save_profile(silent=True)
-        self.root.after_idle(self._autosize_window)
 
     def _load_destination_rows(self, destinations):
         self.clear_destinations()
@@ -1298,7 +1295,6 @@ class ParallelBackupApp:
         self.exclude_var.set(profile.get("exclude", ""))
 
         self._load_destination_rows(profile.get("destinations", []))
-        self.root.after_idle(self._autosize_window)
 
     def write_log(self, message):
         def update():
