@@ -712,10 +712,24 @@ class ParallelBackupApp:
 
         source_row = ttk.Frame(source_card, style="Card.TFrame")
         source_row.pack(fill="x")
-        ttk.Entry(
+        self.source_entry = tk.Entry(
             source_row,
             textvariable=self.source_var,
-        ).pack(side="left", fill="x", expand=True)
+            state="normal",
+            takefocus=True,
+            relief="solid",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
+            highlightcolor=self.colors["primary"],
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
+            insertbackground=self.colors["primary"],
+            font=(self.font_family, 10),
+        )
+        self.source_entry.pack(side="left", fill="x", expand=True, ipady=7)
+        self.source_entry.bind("<Button-1>", lambda event: self.source_entry.focus_set())
+        self.source_entry.bind("<Control-a>", lambda event: (self.source_entry.selection_range(0, tk.END), "break")[1])
         ttk.Button(
             source_row,
             text="찾기",
