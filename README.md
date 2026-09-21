@@ -1,5 +1,7 @@
 # Parallel Backup
 
+현재 버전: **1.2.0**
+
 Windows에서 사용하는 GUI 기반 병렬 백업 프로그램입니다.
 
 ## 핵심 기능
@@ -26,6 +28,14 @@ Windows에서 사용하는 GUI 기반 병렬 백업 프로그램입니다.
 - 누락/변조/복사 오류를 탐지
 - 검증 완료된 스냅샷만 이후 증분 백업의 기준으로 사용
 - 복구 후에도 SHA-256 재검증
+
+
+### ZIP 아카이브 자동 생성
+- 백업 폴더가 검증 완료되면 같은 이름의 `.zip` 파일을 자동 생성
+- ZIP 내부에도 `.parallel-backup/manifest.json`을 포함
+- 생성된 ZIP의 CRC와 파일별 SHA-256을 다시 검증한 뒤 최종 ZIP으로 확정
+- 기존 스냅샷 폴더는 증분 백업과 하드링크 재사용을 위해 유지
+- 오래된 스냅샷을 보존 정책으로 삭제할 때 대응하는 ZIP도 함께 삭제
 
 ### 빠른 해시 캐시
 - `%LOCALAPPDATA%\ParallelBackup\source_cache.json` 사용
@@ -121,9 +131,12 @@ F:\Backups
 결과:
 
 ```
-D:\Backups\uni_mcp_20260921_193000
-E:\Backups\uni_mcp_20260921_193000
-F:\Backups\uni_mcp_20260921_193000
+D:\Backups\uni_mcp_20260921_193000\
+D:\Backups\uni_mcp_20260921_193000.zip
+E:\Backups\uni_mcp_20260921_193000\
+E:\Backups\uni_mcp_20260921_193000.zip
+F:\Backups\uni_mcp_20260921_193000\
+F:\Backups\uni_mcp_20260921_193000.zip
 ```
 
 ## 권장 설정
@@ -148,7 +161,7 @@ SHA-256 검증    ON
 - 중요한 데이터는 서로 다른 물리 드라이브 또는 다른 저장 위치에 복수 백업하는 것을 권장합니다.
 
 
-## UI 디자인 v1.1.0
+## UI 디자인 v1.2.0
 
 GUI는 제공된 **Corporate Trust** 디자인 시스템을 기준으로 전면 재구성했습니다.
 
