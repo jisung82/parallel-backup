@@ -42,7 +42,7 @@ if errorlevel 1 goto TEST_FAILED
 py -3 -m py_compile "%~dp0app.py"
 if errorlevel 1 goto TEST_FAILED
 echo [PASS] BAT and app.py test passed.
-goto END
+exit /b 0
 
 :TEST_PYTHON
 echo Testing python.exe...
@@ -55,6 +55,7 @@ goto END
 
 :TEST_FAILED
 echo [FAIL] BAT or app.py test failed.
+exit /b 1
 
 :SHOW_RESULT
 echo.
