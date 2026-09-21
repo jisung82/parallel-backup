@@ -913,6 +913,34 @@ class ParallelBackupApp:
             style="Body.TLabel",
         ).pack(anchor="w", pady=(0, 9))
 
+        dest_input_row = tk.Frame(destinations_card, bg=self.colors["surface"])
+        dest_input_row.pack(fill="x", pady=(0, 9))
+
+        self.dest_entry = tk.Entry(
+            dest_input_row,
+            font=(self.font_family, 9),
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
+            insertbackground=self.colors["primary"],
+            relief="solid",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
+            highlightcolor=self.colors["primary"],
+        )
+        self.dest_entry.pack(side="left", fill="x", expand=True, ipady=7)
+        self.dest_entry.bind("<Return>", lambda _event: self.add_destination_from_entry())
+        self.dest_entry.insert(0, "예: D:\\backup 또는 E:\\backup")
+        self.dest_entry.config(fg=self.colors["muted"])
+        self.dest_entry.bind("<FocusIn>", self._clear_destination_placeholder)
+        self.dest_entry.bind("<FocusOut>", self._restore_destination_placeholder)
+
+        ttk.Button(
+            dest_input_row,
+            text="찾기",
+            command=self.select_destination_for_entry,
+        ).pack(side="left", padx=(7, 0))
+
         list_holder = tk.Frame(
             destinations_card,
             bg=self.colors["surface"],
@@ -948,8 +976,9 @@ class ParallelBackupApp:
 
         ttk.Button(
             dest_buttons,
-            text="경로 추가",
-            command=self.add_destination,
+            text="입력 경로 추가",
+            command=self.add_destination_from_entry,
+            style="Primary.TButton",
         ).pack(side="left")
         ttk.Button(
             dest_buttons,
@@ -1066,13 +1095,40 @@ class ParallelBackupApp:
             self.source_var.set(path)
             self.save_profile(silent=True)
 
-    def add_destination(self):
-        path = filedialog.askdirectory(title="백업 대상 경로 선택")
-        if path and path not in self.destinations:
+    def _clear_destination_placeholder(self, _event=None):
+        if self.dest_entry.get() == "예: D:\\backup 또는 E:\\backup":
+            self.dest_entry.delete(0, "end")
+            self.dest_entry.config(fg=self.colors["text"])
+
+    def _restore_destination_placeholder(self, _event=None):
+        if not self.dest_entry.get().strip():
+            self.dest_entry.insert(0, "예: D:\\backup 또는 E:\\backup")
+            self.dest_entry.config(fg=self.colors["muted"])
+
+    def add_destination_from_entry(self):
+        self._clear_destination_placeholder()
+        path = self.dest_entry.get().strip().strip('"')
+        if not path:
+            return
+        if path not in self.destinations:
             self.destinations.append(path)
             self.dest_list.insert("end", path)
             self._refresh_metrics()
             self.save_profile(silent=True)
+        self.dest_entry.delete(0, "end")
+        self._restore_destination_placeholder()
+
+    def select_destination_for_entry(self):
+        path = filedialog.askdirectory(title="백업 대상 경로 선택")
+        if path:
+            self._clear_destination_placeholder()
+            self.dest_entry.delete(0, "end")
+            self.dest_entry.insert(0, path)
+            self.dest_entry.config(fg=self.colors["text"])
+
+    def add_destination(self):
+        self.select_destination_for_entry()
+        self.add_destination_from_entry()
 
     def remove_destination(self):
         for index in reversed(self.dest_list.curselection()):
