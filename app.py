@@ -1460,7 +1460,9 @@ class ParallelBackupApp:
         self.progress_value = 0
         self.progress_total = 1
         self.progress.configure(value=0, maximum=1)
-        self.status_var.set("원본 분석 중...")
+        self.status_var.set(
+            "정밀 원본 분석 중..." if deep_scan else "원본 빠른 분석 중..."
+        )
 
         self.write_log(f"[START] {source}")
         self.write_log(f"[TARGETS] {len(destinations)}개 | workers={parallel}")
@@ -1527,7 +1529,7 @@ class ParallelBackupApp:
             expected_ops = max(
                 1,
                 (
-                    file_count * (2 if verify else 1)
+                    file_count
                     + file_count * (2 if deep_scan else 1)
                     + 1
                 )
@@ -1914,7 +1916,7 @@ class ParallelBackupApp:
                 restored += 1
                 self.advance_progress()
 
-            verify_snapshot(
+            verify_snapshot_sha256(
                 target,
                 manifest,
                 self.advance_progress,
