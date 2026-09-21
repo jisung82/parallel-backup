@@ -2566,7 +2566,6 @@ class ParallelBackupApp:
                 if failed == 0:
                     self._set_timeline_stage(6, success=True)
                     self.status_var.set(f"완료 · {success}/{len(results)}개 대상")
-                self._refresh_header()
                     self._refresh_header()
                     messagebox.showinfo(
                         "백업 완료",
