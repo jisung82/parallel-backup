@@ -15,8 +15,11 @@ set "PYTHON_LAUNCHER="
 
 rem 1. Prefer the real Python launcher when available.
 for /f "delims=" %%P in ('where py.exe 2^>nul') do (
-    set "PYTHON_LAUNCHER=%%P"
-    goto FOUND_LAUNCHER
+    "%%P" -3 --version >nul 2>&1
+    if not errorlevel 1 (
+        set "PYTHON_LAUNCHER=%%P"
+        goto FOUND_LAUNCHER
+    )
 )
 
 rem 2. Find a real python.exe and ignore the Microsoft Store WindowsApps alias.
