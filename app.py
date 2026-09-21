@@ -18,7 +18,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
 APP_TITLE = "Parallel Backup"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.5.0"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
@@ -2828,7 +2828,7 @@ class ParallelBackupApp:
             first_destination = destinations[0]
             previous_archive, previous_manifest = find_latest_verified_archive(
                 first_destination,
-                f"{base_name.split('_')[0]}_",
+                f"{base_name.rsplit('_', 2)[0]}_",
                 source,
             )
 
@@ -3337,28 +3337,52 @@ class ParallelBackupApp:
 
     def restore_backup(self):
         if self.running:
-            messagebox.showwarning("사용 중", "백업 또는 복구가 끝난 후 실행하세요.")
+            messagebox.showwarning(
+                "사용 중",
+                "백업 또는 복구가 끝난 후 실행하세요.",
+            )
             return
 
-        backup_text = filedialog.askdirectory(title="복구할 백업 폴더 선택")
-        if not backup_text:
-            return
+        zip_text = filedialog.askopenfilename(
+            title="복구할 ZIP 백업 선택",
+            filetypes=[
+                ("Parallel Backup ZIP", "*.zip"),
+                ("모든 파일", "*.*"),
+            ],
+        )
 
-        backup = Path(backup_text).resolve()
-        manifest = read_manifest(backup)
+        if zip_text:
+            backup = Path(zip_text).resolve()
+        else:
+            # Legacy compatibility: allow selecting old snapshot folders.
+            backup_text = filedialog.askdirectory(
+                title="레거시 백업 폴더 선택"
+            )
+            if not backup_text:
+                return
+            backup = Path(backup_text).resolve()
+
+        is_archive = backup.is_file() and backup.suffix.lower() == ".zip"
+        manifest = (
+            read_manifest_from_zip(backup)
+            if is_archive
+            else read_manifest(backup)
+        )
 
         if (
             not manifest
-            or manifest.get("version") not in (2, 3)
+            or manifest.get("version") not in (2, 3, 4)
             or manifest.get("verified") is not True
         ):
             messagebox.showerror(
                 "복구 오류",
-                "검증 완료된 v2/v3 백업 스냅샷이 아닙니다.",
+                "검증 완료된 Parallel Backup v2/v3/v4 백업이 아닙니다.",
             )
             return
 
-        target_text = filedialog.askdirectory(title="복구 대상 폴더 선택")
+        target_text = filedialog.askdirectory(
+            title="복구 대상 폴더 선택"
+        )
         if not target_text:
             return
 
@@ -3380,13 +3404,20 @@ class ParallelBackupApp:
         self.cancel_button.configure(state="normal")
         self.progress_value = 0
         self.progress_total = max(1, len(files) * 2)
-        self.progress.configure(value=0, maximum=self.progress_total)
-        self.status_var.set("복구 중...")
-        self._set_timeline_stage(2)
+        self.progress.configure(
+            value=0,
+            maximum=self.progress_total,
+        )
+        self.status_var.set("ZIP 복구 중..." if is_archive else "복구 중...")
+        self._set_timeline_stage(5)
+        self._start_operation_timer()
 
         self.write_log(f"[RESTORE] {backup}")
         self.write_log(f"[RESTORE TARGET] {target}")
         self.write_log(f"[RESTORE FILES] {len(files):,}")
+        self.write_log(
+            f"[RESTORE TYPE] {'ZIP' if is_archive else 'legacy snapshot'}"
+        )
 
         threading.Thread(
             target=self.run_restore,
@@ -3396,21 +3427,53 @@ class ParallelBackupApp:
 
     def run_restore(self, backup: Path, target: Path, manifest: dict):
         restored = 0
+        is_archive = backup.is_file() and backup.suffix.lower() == ".zip"
+
         try:
-            for rel in manifest["files"]:
-                if self.cancel_event.is_set():
-                    raise RuntimeError("복구가 취소되었습니다.")
+            if is_archive:
+                with zipfile.ZipFile(backup, "r") as archive:
+                    for rel in manifest["files"]:
+                        if self.cancel_event.is_set():
+                            raise RuntimeError("복구가 취소되었습니다.")
 
-                source_file = backup / Path(rel)
-                target_file = target / Path(rel)
+                        target_file = target / Path(rel)
+                        target_file.parent.mkdir(parents=True, exist_ok=True)
 
-                if not source_file.is_file():
-                    raise FileNotFoundError(f"백업 파일 없음: {rel}")
+                        try:
+                            with archive.open(rel, "r") as source_file, \
+                                    target_file.open("wb") as output:
+                                shutil.copyfileobj(
+                                    source_file,
+                                    output,
+                                    length=1024 * 1024,
+                                )
+                        except KeyError:
+                            raise FileNotFoundError(
+                                f"ZIP 내부 파일 없음: {rel}"
+                            )
 
-                target_file.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source_file, target_file)
-                restored += 1
-                self.advance_progress()
+                        restored += 1
+                        self.advance_progress()
+            else:
+                for rel in manifest["files"]:
+                    if self.cancel_event.is_set():
+                        raise RuntimeError("복구가 취소되었습니다.")
+
+                    source_file = backup / Path(rel)
+                    target_file = target / Path(rel)
+
+                    if not source_file.is_file():
+                        raise FileNotFoundError(
+                            f"백업 파일 없음: {rel}"
+                        )
+
+                    target_file.parent.mkdir(
+                        parents=True,
+                        exist_ok=True,
+                    )
+                    shutil.copy2(source_file, target_file)
+                    restored += 1
+                    self.advance_progress()
 
             verify_snapshot_sha256(
                 target,
@@ -3424,33 +3487,52 @@ class ParallelBackupApp:
                 self.backup_button.configure(state="normal")
                 self.cancel_button.configure(state="disabled")
                 self._set_timeline_stage(6, success=True)
-                self.status_var.set(f"복구 완료: {restored:,}개")
+                elapsed_text = self._format_elapsed(
+                    self.last_elapsed_seconds
+                )
+                self._stop_operation_timer()
+                self.status_var.set(
+                    f"복구 완료: {restored:,}개"
+                )
                 show_windows_notification(
                     "Parallel Backup · 복구 완료",
-                    f"{restored:,}개 파일 복구 + SHA-256 검증 완료",
+                    f"{restored:,}개 파일 복구 + SHA-256 검증 완료 · {elapsed_text}",
                 )
                 messagebox.showinfo(
                     "복구 완료",
-                    f"{restored:,}개 파일 복구 + SHA-256 검증 완료",
+                    f"{restored:,}개 파일 복구 + SHA-256 검증 완료\n"
+                    f"소요 시간: {elapsed_text}",
                 )
 
             self.root.after(0, finish)
 
         except Exception as exc:
             error_text = str(exc)
-            self.write_log(f"[RESTORE FAIL] {error_text}")
+            self.write_log(
+                f"[RESTORE FAIL] {error_text}"
+            )
 
             def finish_error():
                 self.running = False
                 self.backup_button.configure(state="normal")
                 self.cancel_button.configure(state="disabled")
-                self._set_timeline_stage(self.timeline_current, error=True)
+                self._set_timeline_stage(
+                    self.timeline_current,
+                    error=True,
+                )
+                elapsed_text = self._format_elapsed(
+                    self.last_elapsed_seconds
+                )
+                self._stop_operation_timer()
                 self.status_var.set("복구 실패")
                 show_windows_notification(
                     "Parallel Backup · 복구 실패",
                     error_text,
                 )
-                messagebox.showerror("복구 실패", error_text)
+                messagebox.showerror(
+                    "복구 실패",
+                    f"{error_text}\n\n소요 시간: {elapsed_text}",
+                )
 
             self.root.after(0, finish_error)
 
