@@ -1,3 +1,6 @@
+import hashlib
+import json
+import os
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -6,22 +9,147 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+
 APP_TITLE = "Parallel Backup"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
+MANIFEST_DIR = ".parallel-backup"
+MANIFEST_FILE = "manifest.json"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_source_manifest(source: Path):
+    files = {}
+    directories = []
+
+    for root, dirnames, filenames in os.walk(source):
+        root_path = Path(root)
+        rel_root = root_path.relative_to(source)
+        if str(rel_root) != ".":
+            directories.append(rel_root.as_posix())
+
+        for filename in filenames:
+            src = root_path / filename
+            rel = src.relative_to(source).as_posix()
+            stat = src.stat()
+            files[rel] = {
+                "sha256": sha256_file(src),
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+
+    return {"files": files, "directories": sorted(set(directories))}
+
+
+def find_latest_verified_backup(destination: Path, backup_name_prefix: str, source: Path):
+    candidates = [
+        item for item in destination.iterdir()
+        if item.is_dir()
+        and item.name.startswith(backup_name_prefix)
+        and item.name != backup_name_prefix
+    ]
+    candidates.sort(key=lambda item: item.name, reverse=True)
+
+    source_text = str(source.resolve())
+
+    for candidate in candidates:
+        manifest_path = candidate / MANIFEST_DIR / MANIFEST_FILE
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        if (
+            manifest.get("source") == source_text
+            and manifest.get("verified") is True
+            and manifest.get("version") == 2
+        ):
+            return candidate, manifest
+
+    return None, None
+
+
+def write_manifest(target: Path, manifest: dict):
+    manifest_dir = target / MANIFEST_DIR
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = manifest_dir / "manifest.tmp"
+    final_path = manifest_dir / MANIFEST_FILE
+    temp_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(temp_path, final_path)
+
+
+def ensure_directory_tree(source: Path, target: Path):
+    target.mkdir(parents=True, exist_ok=False)
+    for root, dirnames, _ in os.walk(source):
+        rel_root = Path(root).relative_to(source)
+        for dirname in dirnames:
+            (target / rel_root / dirname).mkdir(parents=True, exist_ok=True)
+
+
+def copy_or_link(
+    source_file: Path,
+    target_file: Path,
+    previous_file: Path | None,
+    can_reuse: bool,
+):
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if can_reuse and previous_file is not None:
+        try:
+            os.link(previous_file, target_file)
+            return "hardlink"
+        except OSError:
+            pass
+
+    shutil.copy2(source_file, target_file)
+    return "copy"
+
+
+def verify_backup(target: Path, manifest: dict, progress_callback):
+    for rel, info in manifest["files"].items():
+        path = target / Path(rel)
+        if not path.is_file():
+            raise FileNotFoundError(f"검증 대상이 없음: {rel}")
+
+        actual = sha256_file(path)
+        if actual != info["sha256"]:
+            raise IOError(
+                f"SHA-256 불일치: {rel} "
+                f"(expected={info['sha256']}, actual={actual})"
+            )
+        progress_callback()
+
+    return True
 
 
 class ParallelBackupApp:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("760x560")
-        self.root.minsize(680, 500)
+        self.root.geometry("820x680")
+        self.root.minsize(760, 620)
 
         self.source_var = tk.StringVar()
         self.name_var = tk.StringVar(value="backup")
+        self.incremental_var = tk.BooleanVar(value=True)
+        self.verify_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="대기 중")
+
         self.destinations = []
         self.running = False
+        self.progress_value = 0
+        self.progress_total = 1
 
         self.build_ui()
 
@@ -29,11 +157,11 @@ class ParallelBackupApp:
         outer = ttk.Frame(self.root, padding=16)
         outer.pack(fill="both", expand=True)
 
-        ttk.Label(outer, text="병렬 백업", font=("", 18, "bold")).pack(anchor="w")
+        ttk.Label(outer, text="Parallel Backup", font=("", 18, "bold")).pack(anchor="w")
         ttk.Label(
             outer,
-            text="하나의 원본 폴더를 여러 경로에 동시에 백업합니다."
-        ).pack(anchor="w", pady=(2, 14))
+            text="하나의 원본을 여러 경로에 병렬 백업합니다."
+        ).pack(anchor="w", pady=(2, 12))
 
         source_box = ttk.LabelFrame(outer, text="원본 폴더")
         source_box.pack(fill="x", pady=5)
@@ -49,9 +177,23 @@ class ParallelBackupApp:
         ttk.Entry(name_box, textvariable=self.name_var).pack(
             fill="x", padx=8, pady=8
         )
-        ttk.Label(name_box, text="결과 예: uni_mcp_20260921_193000").pack(
-            anchor="w", padx=8, pady=(0, 8)
-        )
+        ttk.Label(
+            name_box,
+            text="결과 예: uni_mcp_20260921_193000"
+        ).pack(anchor="w", padx=8, pady=(0, 8))
+
+        options = ttk.LabelFrame(outer, text="백업 옵션")
+        options.pack(fill="x", pady=5)
+        ttk.Checkbutton(
+            options,
+            text="증분 백업 (마지막 검증 완료 스냅샷 재사용)",
+            variable=self.incremental_var,
+        ).pack(anchor="w", padx=8, pady=(8, 4))
+        ttk.Checkbutton(
+            options,
+            text="SHA-256 무결성 검사",
+            variable=self.verify_var,
+        ).pack(anchor="w", padx=8, pady=(4, 8))
 
         dest_box = ttk.LabelFrame(outer, text="백업 대상 경로")
         dest_box.pack(fill="both", expand=True, pady=5)
@@ -88,12 +230,12 @@ class ParallelBackupApp:
         self.backup_button.pack(side="left")
         ttk.Label(action, textvariable=self.status_var).pack(side="right")
 
-        self.progress = ttk.Progressbar(outer, mode="indeterminate")
+        self.progress = ttk.Progressbar(outer, mode="determinate", maximum=1)
         self.progress.pack(fill="x", pady=6)
 
         log_box = ttk.LabelFrame(outer, text="로그")
         log_box.pack(fill="both", expand=True, pady=5)
-        self.log = tk.Text(log_box, height=8, state="disabled", wrap="word")
+        self.log = tk.Text(log_box, height=10, state="disabled", wrap="word")
         self.log.pack(fill="both", expand=True, padx=8, pady=8)
 
     def select_source(self):
@@ -123,6 +265,22 @@ class ParallelBackupApp:
             self.log.see("end")
             self.log.configure(state="disabled")
         self.root.after(0, update)
+
+    def set_progress(self, value=None, total=None, status=None):
+        def update():
+            if total is not None:
+                self.progress_total = max(1, total)
+                self.progress.configure(maximum=self.progress_total)
+            if value is not None:
+                self.progress_value = min(self.progress_total, value)
+                self.progress.configure(value=self.progress_value)
+            if status is not None:
+                self.status_var.set(status)
+
+        self.root.after(0, update)
+
+    def advance_progress(self):
+        self.set_progress(value=self.progress_value + 1)
 
     def validate(self):
         source = Path(self.source_var.get().strip())
@@ -173,63 +331,213 @@ class ParallelBackupApp:
                 pass
 
         backup_name = f"{name}_{datetime.now().strftime(TIMESTAMP_FORMAT)}"
+        verify = self.verify_var.get()
+        incremental = self.incremental_var.get()
 
         self.running = True
         self.backup_button.configure(state="disabled")
-        self.progress.start(10)
-        self.status_var.set("백업 중...")
+        self.progress.configure(value=0, maximum=1)
+        self.progress_value = 0
+        self.progress_total = 1
+        self.status_var.set("원본 해시 계산 중...")
+
         self.write_log(f"[START] {source}")
         self.write_log(f"[BACKUP] {backup_name}")
         self.write_log(f"[TARGETS] {len(destinations)}개")
+        self.write_log(f"[INCREMENTAL] {'ON' if incremental else 'OFF'}")
+        self.write_log(f"[VERIFY] {'ON' if verify else 'OFF'}")
 
         threading.Thread(
             target=self.run_backup,
-            args=(source, destinations, backup_name),
+            args=(source, destinations, backup_name, name, incremental, verify),
             daemon=True,
         ).start()
 
-    def run_backup(self, source, destinations, backup_name):
-        results = []
+    def run_backup(
+        self,
+        source: Path,
+        destinations: list[Path],
+        backup_name: str,
+        backup_name_base: str,
+        incremental: bool,
+        verify: bool,
+    ):
+        try:
+            self.write_log("[SCAN] 원본 파일 SHA-256 계산 시작")
+            source_data = build_source_manifest(source)
+            files_count = len(source_data["files"])
+            self.write_log(f"[SCAN] 파일 {files_count:,}개 해시 완료")
 
-        def copy_one(destination):
-            target = destination / backup_name
-            self.write_log(f"[BEGIN] {destination}")
-            try:
-                if target.exists():
-                    raise FileExistsError(f"이미 존재함: {target}")
-                shutil.copytree(source, target)
-                self.write_log(f"[OK] {target}")
-                return True, str(target), None
-            except Exception as exc:
-                self.write_log(f"[FAIL] {destination} -> {exc}")
-                return False, str(target), str(exc)
+            operations_per_destination = files_count * (2 if verify else 1)
+            self.set_progress(
+                value=0,
+                total=max(1, operations_per_destination * len(destinations)),
+                status=f"백업 중... 0/{files_count * len(destinations):,}",
+            )
 
-        with ThreadPoolExecutor(max_workers=len(destinations)) as executor:
-            futures = [executor.submit(copy_one, item) for item in destinations]
-            for future in as_completed(futures):
-                results.append(future.result())
+            with ThreadPoolExecutor(max_workers=len(destinations)) as executor:
+                futures = [
+                    executor.submit(
+                        self.backup_one_destination,
+                        source,
+                        destination,
+                        backup_name,
+                        backup_name_base,
+                        source_data,
+                        incremental,
+                        verify,
+                    )
+                    for destination in destinations
+                ]
 
-        success = sum(1 for ok, _, _ in results if ok)
-        failed = len(results) - success
+                results = [future.result() for future in as_completed(futures)]
 
-        def finish():
-            self.running = False
-            self.backup_button.configure(state="normal")
-            self.progress.stop()
-            self.status_var.set(f"완료: {success} 성공 / {failed} 실패")
+            success = sum(1 for item in results if item["ok"])
+            failed = len(results) - success
 
-            if failed == 0:
-                messagebox.showinfo(
-                    "백업 완료",
-                    f"{success}개 경로에 백업했습니다.\n\n{backup_name}"
+            def finish():
+                self.running = False
+                self.backup_button.configure(state="normal")
+                if failed == 0:
+                    self.status_var.set(f"완료: {success}/{len(results)}")
+                    messagebox.showinfo(
+                        "백업 완료",
+                        f"{success}개 경로 백업 완료\n\n{backup_name}"
+                    )
+                else:
+                    self.status_var.set(
+                        f"완료: {success} 성공 / {failed} 실패"
+                    )
+                    messagebox.showwarning(
+                        "백업 결과",
+                        f"성공: {success}\n실패: {failed}\n\n로그를 확인하세요."
+                    )
+
+            self.root.after(0, finish)
+
+        except Exception as exc:
+            self.write_log(f"[FATAL] {exc}")
+
+            def fail_finish():
+                self.running = False
+                self.backup_button.configure(state="normal")
+                self.status_var.set("실패")
+                messagebox.showerror("백업 실패", str(exc))
+
+            self.root.after(0, fail_finish)
+
+    def backup_one_destination(
+        self,
+        source: Path,
+        destination: Path,
+        backup_name: str,
+        backup_name_base: str,
+        source_data: dict,
+        incremental: bool,
+        verify: bool,
+    ):
+        target = destination / backup_name
+        previous_dir = None
+        previous_manifest = None
+        copied = 0
+        reused = 0
+
+        self.write_log(f"[BEGIN] {destination}")
+
+        try:
+            if target.exists():
+                raise FileExistsError(f"이미 존재함: {target}")
+
+            if incremental:
+                previous_dir, previous_manifest = find_latest_verified_backup(
+                    destination,
+                    f"{backup_name_base}_",
+                    source,
+                )
+                if previous_dir:
+                    self.write_log(
+                        f"[INCREMENTAL] {destination} <- {previous_dir.name}"
+                    )
+                else:
+                    self.write_log(
+                        f"[INCREMENTAL] {destination} -> 검증 완료 기준 없음, 전체 복사"
+                    )
+
+            ensure_directory_tree(source, target)
+
+            previous_files = (
+                previous_manifest.get("files", {})
+                if previous_manifest is not None
+                else {}
+            )
+
+            for rel, info in source_data["files"].items():
+                src = source / Path(rel)
+                dst = target / Path(rel)
+
+                old_info = previous_files.get(rel)
+                old_file = previous_dir / Path(rel) if previous_dir else None
+
+                can_reuse = bool(
+                    incremental
+                    and old_info
+                    and old_file
+                    and old_file.is_file()
+                    and old_info.get("sha256") == info["sha256"]
+                    and old_info.get("size") == info["size"]
+                    and old_info.get("mtime_ns") == info["mtime_ns"]
+                )
+
+                operation = copy_or_link(
+                    src,
+                    dst,
+                    old_file,
+                    can_reuse,
+                )
+
+                if operation == "hardlink":
+                    reused += 1
+                else:
+                    copied += 1
+
+                self.advance_progress()
+
+            manifest = {
+                "version": 2,
+                "source": str(source),
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "verified": False,
+                "files": source_data["files"],
+                "directories": source_data["directories"],
+                "stats": {
+                    "files": len(source_data["files"]),
+                    "copied": copied,
+                    "reused": reused,
+                },
+            }
+
+            if verify:
+                self.write_log(f"[VERIFY] {destination}")
+                verify_backup(target, manifest, self.advance_progress)
+                manifest["verified"] = True
+                self.write_log(
+                    f"[VERIFY OK] {destination} | "
+                    f"copied={copied:,}, reused={reused:,}"
                 )
             else:
-                messagebox.showwarning(
-                    "백업 결과",
-                    f"성공: {success}\n실패: {failed}\n\n로그를 확인하세요."
+                self.write_log(
+                    f"[VERIFY SKIP] {destination} | "
+                    f"copied={copied:,}, reused={reused:,}"
                 )
 
-        self.root.after(0, finish)
+            write_manifest(target, manifest)
+
+            self.write_log(f"[OK] {target}")
+            return {"ok": True, "target": str(target)}
+
+        except Exception as exc:
+            self.write_log(f"[FAIL] {destination} -> {exc}")
+            return {"ok": False, "target": str(target), "error": str(exc)}
 
 
 if __name__ == "__main__":
