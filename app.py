@@ -15,7 +15,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
 APP_TITLE = "Parallel Backup"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
@@ -83,30 +83,37 @@ def create_zip_archive(snapshot: Path, archive_path: Path, progress_callback, ca
             progress_callback()
 
 
-def verify_zip_archive(archive_path: Path, manifest: dict, progress_callback, cancel_event):
+def verify_zip_archive(
+    archive_path: Path,
+    manifest: dict,
+    progress_callback,
+    cancel_event,
+    deep_scan: bool,
+):
     with zipfile.ZipFile(archive_path, mode="r") as archive:
         bad_member = archive.testzip()
         if bad_member is not None:
             raise IOError(f"ZIP CRC 검증 실패: {bad_member}")
 
-        for rel, info in manifest["files"].items():
-            if cancel_event.is_set():
-                raise RuntimeError("ZIP 검증이 취소되었습니다.")
-            try:
-                with archive.open(rel, "r") as handle:
-                    digest = hashlib.sha256()
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                    actual = digest.hexdigest()
-            except KeyError:
-                raise FileNotFoundError(f"ZIP에 파일 없음: {rel}")
+        if deep_scan:
+            for rel, info in manifest["files"].items():
+                if cancel_event.is_set():
+                    raise RuntimeError("ZIP 검증이 취소되었습니다.")
+                try:
+                    with archive.open(rel, "r") as handle:
+                        digest = hashlib.sha256()
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                        actual = digest.hexdigest()
+                except KeyError:
+                    raise FileNotFoundError(f"ZIP에 파일 없음: {rel}")
 
-            if actual != info["sha256"]:
-                raise IOError(
-                    f"ZIP SHA-256 불일치: {rel} "
-                    f"(expected={info['sha256']}, actual={actual})"
-                )
-            progress_callback()
+                if actual != info["sha256"]:
+                    raise IOError(
+                        f"ZIP SHA-256 불일치: {rel} "
+                        f"(expected={info['sha256']}, actual={actual})"
+                    )
+                progress_callback()
 
     manifest_member = MANIFEST_DIR + "/" + MANIFEST_FILE
     with zipfile.ZipFile(archive_path, mode="r") as archive:
@@ -140,14 +147,14 @@ def save_source_cache(cache: dict):
     save_json_atomic(source_cache_path(), cache)
 
 
-def build_source_manifest(source: Path, use_cache: bool, exclude_patterns):
+def build_source_manifest(source: Path, deep_scan: bool, exclude_patterns):
     files = {}
     directories = set()
     cache_hits = 0
     cache_misses = 0
     skipped = 0
 
-    cache = load_source_cache() if use_cache else {"version": 2, "sources": {}}
+    cache = load_source_cache() if deep_scan else {"version": 2, "sources": {}}
     source_key = str(source.resolve())
     source_cache = cache.setdefault("sources", {}).setdefault(source_key, {})
     cached_files = source_cache.get("files", {})
@@ -173,22 +180,24 @@ def build_source_manifest(source: Path, use_cache: bool, exclude_patterns):
                 continue
 
             stat = src.stat()
-            cached = cached_files.get(rel)
-            valid_cache = bool(
-                use_cache
-                and cached
-                and cached.get("sha256")
-                and cached.get("size") == stat.st_size
-                and cached.get("mtime_ns") == stat.st_mtime_ns
-                and cached.get("ctime_ns") == stat.st_ctime_ns
-            )
 
-            if valid_cache:
-                file_hash = cached["sha256"]
-                cache_hits += 1
-            else:
-                file_hash = sha256_file(src)
-                cache_misses += 1
+            file_hash = None
+            if deep_scan:
+                cached = cached_files.get(rel)
+                valid_cache = bool(
+                    cached
+                    and cached.get("sha256")
+                    and cached.get("size") == stat.st_size
+                    and cached.get("mtime_ns") == stat.st_mtime_ns
+                    and cached.get("ctime_ns") == stat.st_ctime_ns
+                )
+
+                if valid_cache:
+                    file_hash = cached["sha256"]
+                    cache_hits += 1
+                else:
+                    file_hash = sha256_file(src)
+                    cache_misses += 1
 
             files[rel] = {
                 "sha256": file_hash,
@@ -205,7 +214,7 @@ def build_source_manifest(source: Path, use_cache: bool, exclude_patterns):
         "excluded": skipped,
     }
 
-    if use_cache:
+    if deep_scan:
         cache.setdefault("sources", {})[source_key] = {
             "files": files,
             "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -307,10 +316,38 @@ def copy_file(source_file: Path, target_file: Path, previous_file: Path | None, 
     return "copy"
 
 
-def verify_snapshot(snapshot: Path, manifest: dict, progress_callback, cancel_event):
+def verify_snapshot_fast(
+    source: Path,
+    snapshot: Path,
+    manifest: dict,
+    progress_callback,
+    cancel_event,
+):
     for rel, info in manifest["files"].items():
         if cancel_event.is_set():
             raise RuntimeError("작업이 취소되었습니다.")
+
+        source_path = source / Path(rel)
+        snapshot_path = snapshot / Path(rel)
+        if not source_path.is_file():
+            raise FileNotFoundError(f"원본 파일 없음: {rel}")
+        if not snapshot_path.is_file():
+            raise FileNotFoundError(f"백업 파일 없음: {rel}")
+
+        source_size = source_path.stat().st_size
+        snapshot_size = snapshot_path.stat().st_size
+        if source_size != snapshot_size:
+            raise IOError(
+                f"파일 크기 불일치: {rel} "
+                f"(source={source_size}, backup={snapshot_size})"
+            )
+        progress_callback()
+
+
+def verify_snapshot_sha256(snapshot: Path, manifest: dict, progress_callback, cancel_event):
+    for rel, info in manifest["files"].items():
+        if cancel_event.is_set():
+            raise RuntimeError("검증 대상 검사가 취소되었습니다.")
 
         path = snapshot / Path(rel)
         if not path.is_file():
@@ -340,8 +377,7 @@ class ParallelBackupApp:
         self.source_var = tk.StringVar()
         self.name_var = tk.StringVar(value="backup")
         self.incremental_var = tk.BooleanVar(value=True)
-        self.verify_var = tk.BooleanVar(value=True)
-        self.cache_var = tk.BooleanVar(value=True)
+        self.backup_mode_var = tk.StringVar(value="일반 백업")
         self.hardlink_var = tk.BooleanVar(value=True)
         self.parallel_var = tk.IntVar(value=3)
         self.keep_var = tk.IntVar(value=10)
@@ -869,15 +905,35 @@ class ParallelBackupApp:
             style="Body.TLabel",
         ).pack(anchor="w", pady=(0, 10))
 
+        ttk.Label(
+            options_card,
+            text="백업 방식",
+            foreground=self.colors["muted"],
+            font=(self.font_family, 9, "bold"),
+        ).pack(anchor="w", pady=(0, 4))
+
+        mode_row = ttk.Frame(options_card, style="Card.TFrame")
+        mode_row.pack(fill="x", pady=(0, 6))
+        ttk.Radiobutton(
+            mode_row,
+            text="일반 백업 · 빠른 검사",
+            variable=self.backup_mode_var,
+            value="일반 백업",
+        ).pack(side="left", padx=(0, 14))
+        ttk.Radiobutton(
+            mode_row,
+            text="정밀 검사 백업 · SHA-256",
+            variable=self.backup_mode_var,
+            value="정밀 검사 백업",
+        ).pack(side="left")
+
         option_grid = ttk.Frame(options_card, style="Card.TFrame")
-        option_grid.pack(fill="x")
+        option_grid.pack(fill="x", pady=(4, 0))
         option_grid.columnconfigure(0, weight=1)
         option_grid.columnconfigure(1, weight=1)
 
         for row, (text_label, variable) in enumerate([
             ("증분 백업", self.incremental_var),
-            ("SHA-256 검증", self.verify_var),
-            ("빠른 해시 캐시", self.cache_var),
             ("하드링크 재사용", self.hardlink_var),
         ]):
             ttk.Checkbutton(
@@ -1264,8 +1320,7 @@ class ParallelBackupApp:
             "name": self.name_var.get().strip(),
             "destinations": self.destinations,
             "incremental": self.incremental_var.get(),
-            "verify": self.verify_var.get(),
-            "cache": self.cache_var.get(),
+            "backup_mode": self.backup_mode_var.get(),
             "hardlink": self.hardlink_var.get(),
             "parallel": self.parallel_var.get(),
             "keep": self.keep_var.get(),
@@ -1287,8 +1342,7 @@ class ParallelBackupApp:
         self.source_var.set(profile.get("source", ""))
         self.name_var.set(profile.get("name", "backup"))
         self.incremental_var.set(profile.get("incremental", True))
-        self.verify_var.set(profile.get("verify", True))
-        self.cache_var.set(profile.get("cache", True))
+        self.backup_mode_var.set(profile.get("backup_mode", "일반 백업"))
         self.hardlink_var.set(profile.get("hardlink", True))
         self.parallel_var.set(int(profile.get("parallel", 3)))
         self.keep_var.set(int(profile.get("keep", 10)))
@@ -1396,8 +1450,7 @@ class ParallelBackupApp:
 
         self.save_profile(silent=True)
         incremental = self.incremental_var.get()
-        verify = self.verify_var.get()
-        use_cache = self.cache_var.get()
+        deep_scan = self.backup_mode_var.get() == "정밀 검사 백업"
         hardlink = self.hardlink_var.get()
 
         self.running = True
@@ -1414,9 +1467,8 @@ class ParallelBackupApp:
         self.write_log(f"[NAME] {base_name}")
         self.write_log(f"[KEEP] {keep}")
         self.write_log(
-            f"[OPTIONS] incremental={incremental} "
-            f"verify={verify} "
-            f"cache={use_cache} "
+            f"[OPTIONS] mode={self.backup_mode_var.get()} "
+            f"incremental={incremental} "
             f"hardlink={hardlink}"
         )
         self.write_log(
@@ -1433,8 +1485,7 @@ class ParallelBackupApp:
                 keep,
                 exclude_patterns,
                 incremental,
-                verify,
-                use_cache,
+                deep_scan,
                 hardlink,
             ),
             daemon=True,
@@ -1449,14 +1500,13 @@ class ParallelBackupApp:
         keep: int,
         exclude_patterns,
         incremental: bool,
-        verify: bool,
-        use_cache: bool,
+        deep_scan: bool,
         hardlink: bool,
     ):
         try:
             source_data = build_source_manifest(
                 source,
-                use_cache=use_cache,
+                deep_scan=deep_scan,
                 exclude_patterns=exclude_patterns,
             )
             if self.cancel_event.is_set():
@@ -1478,7 +1528,7 @@ class ParallelBackupApp:
                 1,
                 (
                     file_count * (2 if verify else 1)
-                    + file_count * 2
+                    + file_count * (2 if deep_scan else 1)
                     + 1
                 )
                 * len(destinations),
@@ -1502,7 +1552,7 @@ class ParallelBackupApp:
                         source_data,
                         keep,
                         incremental,
-                        verify,
+                        deep_scan,
                         hardlink,
                         exclude_patterns,
                     ): destination
@@ -1563,7 +1613,7 @@ class ParallelBackupApp:
         source_data: dict,
         keep: int,
         incremental: bool,
-        verify: bool,
+        deep_scan: bool,
         hardlink: bool,
         exclude_patterns,
     ):
@@ -1608,9 +1658,13 @@ class ParallelBackupApp:
                     and old_info
                     and old_file
                     and old_file.is_file()
-                    and old_info.get("sha256") == info["sha256"]
                     and old_info.get("size") == info["size"]
                     and old_info.get("mtime_ns") == info["mtime_ns"]
+                    and old_info.get("ctime_ns") == info["ctime_ns"]
+                    and (
+                        not deep_scan
+                        or old_info.get("sha256") == info["sha256"]
+                    )
                 )
                 if can_reuse:
                     reusable_bytes += info["size"]
@@ -1642,9 +1696,13 @@ class ParallelBackupApp:
                     and old_info
                     and old_file
                     and old_file.is_file()
-                    and old_info.get("sha256") == info["sha256"]
                     and old_info.get("size") == info["size"]
                     and old_info.get("mtime_ns") == info["mtime_ns"]
+                    and old_info.get("ctime_ns") == info["ctime_ns"]
+                    and (
+                        not deep_scan
+                        or old_info.get("sha256") == info["sha256"]
+                    )
                 )
 
                 operation = copy_file(
@@ -1667,6 +1725,7 @@ class ParallelBackupApp:
                 "source": str(source.resolve()),
                 "created_at": datetime.now().isoformat(timespec="seconds"),
                 "verified": False,
+                "verification": "sha256" if deep_scan else "fast",
                 "backup_name": backup_name,
                 "exclude_patterns": exclude_patterns,
                 "files": source_data["files"],
@@ -1683,16 +1742,27 @@ class ParallelBackupApp:
 
             write_manifest(partial_target, manifest)
 
-            if verify:
-                self.write_log(f"[VERIFY] {destination}")
-                verify_snapshot(
+            self.write_log(
+                f"[VERIFY] {destination} | "
+                f"{'SHA-256' if deep_scan else '빠른 검사'}"
+            )
+            if deep_scan:
+                verify_snapshot_sha256(
                     partial_target,
                     manifest,
                     self.advance_progress,
                     self.cancel_event,
                 )
-                manifest["verified"] = True
-                write_manifest(partial_target, manifest)
+            else:
+                verify_snapshot_fast(
+                    source,
+                    partial_target,
+                    manifest,
+                    self.advance_progress,
+                    self.cancel_event,
+                )
+            manifest["verified"] = True
+            write_manifest(partial_target, manifest)
 
             if self.cancel_event.is_set():
                 raise RuntimeError("백업이 취소되었습니다.")
@@ -1716,6 +1786,7 @@ class ParallelBackupApp:
                 manifest,
                 self.advance_progress,
                 self.cancel_event,
+                deep_scan,
             )
 
             if self.cancel_event.is_set():
