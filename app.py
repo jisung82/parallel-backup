@@ -305,6 +305,7 @@ class ParallelBackupApp:
         self.build_ui()
         self.load_profile()
         self._refresh_metrics()
+        self.root.after_idle(self._autosize_window)
 
     def _setup_style(self):
         self.colors = {
@@ -635,6 +636,8 @@ class ParallelBackupApp:
         self.root.title("Parallel Backup")
         self.root.geometry("1040x820")
         self.root.minsize(920, 720)
+        self._user_resized = False
+        self.root.bind("<Configure>", self._track_manual_resize)
 
         outer = tk.Frame(self.root, bg=self.colors["bg"])
         outer.pack(fill="both", expand=True)
@@ -1029,6 +1032,41 @@ class ParallelBackupApp:
         self.root.bind("<Configure>", lambda _event: self._refresh_metrics())
         self._refresh_metrics()
 
+    def _track_manual_resize(self, event):
+        if event.widget is self.root:
+            self._user_resized = True
+
+    def _autosize_window(self):
+        if getattr(self, "_autosizing", False):
+            return
+
+        self._autosizing = True
+        try:
+            self.root.update_idletasks()
+
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+
+            requested_width = max(1040, self.root.winfo_reqwidth())
+            requested_height = max(820, self.root.winfo_reqheight())
+
+            max_width = max(1040, screen_width - 40)
+            max_height = max(720, screen_height - 80)
+
+            # The window grows automatically while there is room on screen.
+            # Manual user resizing is respected after the initial layout.
+            current_width = self.root.winfo_width()
+            current_height = self.root.winfo_height()
+
+            if not self._user_resized or len(self.destination_rows) > 0:
+                width = min(max(requested_width, current_width), max_width)
+                height = min(requested_height, max_height)
+
+                if height != current_height or width != current_width:
+                    self.root.geometry(f"{width}x{height}")
+        finally:
+            self._autosizing = False
+
     def _refresh_metrics(self):
         if hasattr(self, "metric_targets"):
             self.metric_targets.set(str(len(self.destinations)))
@@ -1118,6 +1156,7 @@ class ParallelBackupApp:
         self._build_destination_row(value)
         self._sync_destinations()
         self.save_profile(silent=True)
+        self.root.after_idle(self._autosize_window)
 
     def select_destination_row(self, entry, variable):
         path = filedialog.askdirectory(title="백업 대상 경로 선택")
@@ -1134,6 +1173,7 @@ class ParallelBackupApp:
         self._renumber_destination_rows()
         self._sync_destinations()
         self.save_profile(silent=True)
+        self.root.after_idle(self._autosize_window)
 
     def clear_destinations(self):
         for row in self.destination_rows:
@@ -1142,6 +1182,7 @@ class ParallelBackupApp:
         self.destinations.clear()
         self._refresh_metrics()
         self.save_profile(silent=True)
+        self.root.after_idle(self._autosize_window)
 
     def _load_destination_rows(self, destinations):
         self.clear_destinations()
@@ -1189,6 +1230,7 @@ class ParallelBackupApp:
         self.exclude_var.set(profile.get("exclude", ""))
 
         self._load_destination_rows(profile.get("destinations", []))
+        self.root.after_idle(self._autosize_window)
 
     def write_log(self, message):
         def update():
