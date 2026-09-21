@@ -29,7 +29,6 @@ jobs:
       - name: Test launcher
         shell: cmd
         run: |
-          set PARALLEL_BACKUP_TEST=1
           call ParallelBackup.bat
 
       - name: Verify app syntax
