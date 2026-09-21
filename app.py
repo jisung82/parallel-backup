@@ -684,8 +684,7 @@ class ParallelBackupApp:
         content.bind("<Configure>", update_scroll_region)
         self.scroll_canvas.bind("<Configure>", resize_content)
 
-        self.scroll_canvas.bind("<Enter>", self._bind_mousewheel)
-        self.scroll_canvas.bind("<Leave>", self._unbind_mousewheel)
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel)
 
         top = ttk.Frame(content)
         top.pack(fill="x", pady=(0, 12))
