@@ -1,5 +1,6 @@
 import fnmatch
 import hashlib
+import html
 import json
 import os
 import shutil
@@ -15,7 +16,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
 APP_TITLE = "Parallel Backup"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
@@ -23,6 +24,80 @@ SOURCE_CACHE_FILE = "source_cache.json"
 PROFILE_FILE = "profile.json"
 STALE_PARTIAL_SECONDS = 24 * 60 * 60
 DEFAULT_FREE_SPACE_RESERVE = 64 * 1024 * 1024
+
+
+def show_windows_notification(title, message):
+    """Show a Windows toast notification, with sound fallback."""
+    if os.name != "nt":
+        return
+
+    safe_title = html.escape(str(title), quote=True)
+    safe_message = html.escape(str(message), quote=True)
+
+    powershell = (
+        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, "
+        "ContentType = WindowsRuntime] > $null; "
+        "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, "
+        "ContentType = WindowsRuntime] > $null; "
+        "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument; "
+        f"$xml.LoadXml('<toast><visual><binding template="ToastGeneric">"
+        f"<text>{safe_title}</text><text>{safe_message}</text>"
+        f"</binding></visual></toast>'); "
+        "$toast = New-Object Windows.UI.Notifications.ToastNotification $xml; "
+        "[Windows.UI.Notifications.ToastNotificationManager]::"
+        "CreateToastNotifier('Parallel Backup').Show($toast)"
+    )
+
+    try:
+        subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                powershell,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=4,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    try:
+        import winsound
+        winsound.MessageBeep(winsound.MB_ICONASTERISK)
+    except Exception:
+        pass
+
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if hwnd:
+            class FLASHWINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", ctypes.c_uint),
+                    ("hwnd", ctypes.c_void_p),
+                    ("dwFlags", ctypes.c_uint),
+                    ("uCount", ctypes.c_uint),
+                    ("dwTimeout", ctypes.c_uint),
+                ]
+
+            info = FLASHWINFO(
+                ctypes.sizeof(FLASHWINFO),
+                hwnd,
+                0x00000003,
+                3,
+                0,
+            )
+            ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+    except Exception:
+        pass
 
 
 def local_app_dir() -> Path:
@@ -1761,6 +1836,10 @@ class ParallelBackupApp:
                 self.running=False
                 self.compare_button.configure(state="normal")
                 self._refresh_header()
+                show_windows_notification(
+                    "Parallel Backup · 파일 비교 완료",
+                    f"{len(final):,}개 파일 비교 완료",
+                )
             self.root.after(0,finish)
         except Exception as exc:
             error_text=str(exc)
@@ -1772,6 +1851,10 @@ class ParallelBackupApp:
                 self.running=False
                 self.compare_button.configure(state="normal")
                 self._refresh_header()
+                show_windows_notification(
+                    "Parallel Backup · 파일 비교 실패",
+                    error_text,
+                )
                 messagebox.showerror("파일 비교 실패",error_text)
             self.root.after(0,fail)
 
@@ -2567,6 +2650,10 @@ class ParallelBackupApp:
                     self._set_timeline_stage(6, success=True)
                     self.status_var.set(f"완료 · {success}/{len(results)}개 대상")
                     self._refresh_header()
+                    show_windows_notification(
+                        "Parallel Backup · 백업 완료",
+                        f"{success}개 경로 백업 완료 · {elapsed_text}",
+                    )
                     messagebox.showinfo(
                         "백업 완료",
                         f"{success}개 경로 백업 완료\n소요 시간: {elapsed_text}",
@@ -2577,6 +2664,10 @@ class ParallelBackupApp:
                         f"완료 · {success} 성공 / {failed} 실패"
                     )
                     self._refresh_header()
+                    show_windows_notification(
+                        "Parallel Backup · 백업 결과",
+                        f"성공 {success} / 실패 {failed} · {elapsed_text}",
+                    )
                     messagebox.showwarning(
                         "백업 결과",
                         f"성공: {success}\n실패: {failed}\n소요 시간: {elapsed_text}\n로그를 확인하세요.",
@@ -2585,7 +2676,8 @@ class ParallelBackupApp:
             self.root.after(0, finish)
 
         except Exception as exc:
-            self.write_log(f"[FATAL] {exc}")
+            error_text = str(exc)
+            self.write_log(f"[FATAL] {error_text}")
 
             def finish_error():
                 self.running = False
@@ -2596,7 +2688,11 @@ class ParallelBackupApp:
                 self._set_timeline_stage(self.timeline_current, error=True)
                 self.status_var.set(f"실패 · {elapsed_text}")
                 self._refresh_header()
-                messagebox.showerror("백업 실패", f"{exc}\n\n소요 시간: {elapsed_text}")
+                show_windows_notification(
+                    "Parallel Backup · 백업 실패",
+                    f"{error_text} · {elapsed_text}",
+                )
+                messagebox.showerror("백업 실패", f"{error_text}\n\n소요 시간: {elapsed_text}")
 
             self.root.after(0, finish_error)
 
@@ -2938,6 +3034,10 @@ class ParallelBackupApp:
                 self.cancel_button.configure(state="disabled")
                 self._set_timeline_stage(6, success=True)
                 self.status_var.set(f"복구 완료: {restored:,}개")
+                show_windows_notification(
+                    "Parallel Backup · 복구 완료",
+                    f"{restored:,}개 파일 복구 + SHA-256 검증 완료",
+                )
                 messagebox.showinfo(
                     "복구 완료",
                     f"{restored:,}개 파일 복구 + SHA-256 검증 완료",
@@ -2946,7 +3046,8 @@ class ParallelBackupApp:
             self.root.after(0, finish)
 
         except Exception as exc:
-            self.write_log(f"[RESTORE FAIL] {exc}")
+            error_text = str(exc)
+            self.write_log(f"[RESTORE FAIL] {error_text}")
 
             def finish_error():
                 self.running = False
@@ -2954,7 +3055,11 @@ class ParallelBackupApp:
                 self.cancel_button.configure(state="disabled")
                 self._set_timeline_stage(self.timeline_current, error=True)
                 self.status_var.set("복구 실패")
-                messagebox.showerror("복구 실패", str(exc))
+                show_windows_notification(
+                    "Parallel Backup · 복구 실패",
+                    error_text,
+                )
+                messagebox.showerror("복구 실패", error_text)
 
             self.root.after(0, finish_error)
 
