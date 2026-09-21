@@ -15,7 +15,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
 APP_TITLE = "Parallel Backup"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
@@ -373,6 +373,13 @@ class ParallelBackupApp:
         self.root.title(APP_TITLE)
         self.root.geometry("900x760")
         self.root.minsize(820, 700)
+
+        icon_path = Path(__file__).resolve().parent / "assets" / "parallel_backup.ico"
+        try:
+            if icon_path.is_file():
+                self.root.iconbitmap(default=str(icon_path))
+        except tk.TclError:
+            pass
 
         self.source_var = tk.StringVar()
         self.name_var = tk.StringVar(value="backup")
