@@ -150,6 +150,7 @@ class ParallelBackupApp:
         self.running = False
         self.progress_value = 0
         self.progress_total = 1
+        self.progress_lock = threading.Lock()
 
         self.build_ui()
 
@@ -280,7 +281,10 @@ class ParallelBackupApp:
         self.root.after(0, update)
 
     def advance_progress(self):
-        self.set_progress(value=self.progress_value + 1)
+        with self.progress_lock:
+            self.progress_value += 1
+            value = self.progress_value
+        self.set_progress(value=value)
 
     def validate(self):
         source = Path(self.source_var.get().strip())
@@ -445,6 +449,8 @@ class ParallelBackupApp:
         self.write_log(f"[BEGIN] {destination}")
 
         try:
+            destination.mkdir(parents=True, exist_ok=True)
+
             if target.exists():
                 raise FileExistsError(f"이미 존재함: {target}")
 
