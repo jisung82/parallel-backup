@@ -912,20 +912,35 @@ class ParallelBackupApp:
             font=(self.font_family, 9, "bold"),
         ).pack(anchor="w", pady=(0, 4))
 
-        mode_row = ttk.Frame(options_card, style="Card.TFrame")
-        mode_row.pack(fill="x", pady=(0, 6))
-        ttk.Radiobutton(
-            mode_row,
-            text="일반 백업 · 빠른 검사",
-            variable=self.backup_mode_var,
-            value="일반 백업",
-        ).pack(side="left", padx=(0, 14))
-        ttk.Radiobutton(
-            mode_row,
-            text="정밀 검사 백업 · SHA-256",
-            variable=self.backup_mode_var,
-            value="정밀 검사 백업",
-        ).pack(side="left")
+        mode_row = tk.Frame(
+            options_card,
+            bg=self.colors["border"],
+            highlightthickness=0,
+            bd=0,
+        )
+        mode_row.pack(fill="x", pady=(0, 6), ipady=1)
+
+        self.mode_buttons = {}
+        for mode_key, label in [
+            ("일반 백업", "일반 백업"),
+            ("정밀 검사 백업", "정밀 검사 백업"),
+        ]:
+            button = tk.Button(
+                mode_row,
+                text=label,
+                command=lambda value=mode_key: self.set_backup_mode(value),
+                relief="flat",
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2",
+                font=(self.font_family, 9, "bold"),
+                padx=14,
+                pady=8,
+            )
+            button.pack(side="left", fill="x", expand=True)
+            self.mode_buttons[mode_key] = button
+
+        self._refresh_backup_mode_segment();
 
         option_grid = ttk.Frame(options_card, style="Card.TFrame")
         option_grid.pack(fill="x", pady=(4, 0))
@@ -1191,6 +1206,34 @@ class ParallelBackupApp:
     def _unbind_mousewheel(self, _event=None):
         self.root.unbind_all("<MouseWheel>")
 
+    def set_backup_mode(self, mode):
+        if mode not in ("일반 백업", "정밀 검사 백업"):
+            return
+        self.backup_mode_var.set(mode)
+        self._refresh_backup_mode_segment()
+        self.save_profile(silent=True)
+
+    def _refresh_backup_mode_segment(self):
+        if not hasattr(self, "mode_buttons"):
+            return
+
+        active = self.backup_mode_var.get()
+        for mode, button in self.mode_buttons.items():
+            if mode == active:
+                button.configure(
+                    bg=self.colors["primary"],
+                    fg="#FFFFFF",
+                    activebackground=self.colors["primary_dark"],
+                    activeforeground="#FFFFFF",
+                )
+            else:
+                button.configure(
+                    bg=self.colors["surface"],
+                    fg=self.colors["muted"],
+                    activebackground=self.colors["soft_indigo"],
+                    activeforeground=self.colors["primary_dark"],
+                )
+
     def _refresh_metrics(self):
         if hasattr(self, "metric_targets"):
             self.metric_targets.set(str(len(self.destinations)))
@@ -1343,6 +1386,7 @@ class ParallelBackupApp:
         self.name_var.set(profile.get("name", "backup"))
         self.incremental_var.set(profile.get("incremental", True))
         self.backup_mode_var.set(profile.get("backup_mode", "일반 백업"))
+        self._refresh_backup_mode_segment()
         self.hardlink_var.set(profile.get("hardlink", True))
         self.parallel_var.set(int(profile.get("parallel", 3)))
         self.keep_var.set(int(profile.get("keep", 10)))
