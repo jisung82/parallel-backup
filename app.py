@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import threading
 import time
+import tempfile
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -319,11 +320,14 @@ def read_manifest(snapshot: Path):
 def cleanup_stale_partials(destination: Path):
     now = time.time()
     for item in destination.iterdir():
-        if not item.is_dir() or ".parallel-backup.partial-" not in item.name:
+        if ".parallel-backup.partial-" not in item.name:
             continue
         try:
             if now - item.stat().st_mtime > STALE_PARTIAL_SECONDS:
-                shutil.rmtree(item, ignore_errors=True)
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                elif item.is_file():
+                    item.unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -354,6 +358,57 @@ def list_verified_snapshots(destination: Path, prefix: str, source: Path):
 def find_latest_verified_backup(destination: Path, prefix: str, source: Path):
     snapshots = list_verified_snapshots(destination, prefix, source)
     return snapshots[0] if snapshots else (None, None)
+
+
+def read_manifest_from_zip(archive: Path):
+    try:
+        with zipfile.ZipFile(archive, "r") as zf:
+            raw = zf.read(f"{MANIFEST_DIR}/{MANIFEST_FILE}")
+        return json.loads(raw.decode("utf-8"))
+    except (OSError, zipfile.BadZipFile, KeyError, json.JSONDecodeError):
+        return None
+
+
+def list_verified_archives(destination: Path, prefix: str, source: Path):
+    source_text = str(source.resolve())
+    results = []
+    if not destination.is_dir():
+        return results
+
+    for item in destination.iterdir():
+        if not item.is_file() or item.suffix.lower() != ".zip":
+            continue
+        if not item.stem.startswith(prefix):
+            continue
+
+        manifest = read_manifest_from_zip(item)
+        if not manifest:
+            continue
+
+        if (
+            manifest.get("version") in (2, 3, 4)
+            and manifest.get("source") == source_text
+            and manifest.get("verified") is True
+        ):
+            results.append((item, manifest))
+
+    results.sort(key=lambda x: x[0].name, reverse=True)
+    return results
+
+
+def find_latest_verified_archive(destination: Path, prefix: str, source: Path):
+    archives = list_verified_archives(destination, prefix, source)
+    return archives[0] if archives else (None, None)
+
+
+def make_unique_archive_name(destinations, desired: str):
+    candidate = desired
+    counter = 1
+    while any((Path(d) / candidate).exists() for d in destinations):
+        stem = Path(desired).stem
+        candidate = f"{stem}_{counter:02d}.zip"
+        counter += 1
+    return candidate
 
 
 def make_unique_backup_name(destination: Path, desired: str):
@@ -491,10 +546,10 @@ class ParallelBackupApp:
         self.timeline_steps = [
             ("원본 분석", "scan"),
             ("파일 목록 생성", "files"),
-            ("백업 복사", "copy"),
-            ("무결성 검사", "check"),
+            ("스냅샷 구성", "copy"),
             ("압축 (ZIP)", "zip"),
-            ("최종 검증", "shield"),
+            ("ZIP 검증", "shield"),
+            ("병렬 복사", "copy"),
             ("완료", "flag"),
         ]
         self.timeline_current = -1
