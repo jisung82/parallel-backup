@@ -1,0 +1,38 @@
+name: Test Windows BAT
+
+on:
+  push:
+    paths:
+      - "ParallelBackup.bat"
+      - "app.py"
+      - ".github/workflows/test-windows-bat.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inspect Python
+        shell: cmd
+        run: |
+          echo ==== where python.exe ====
+          where python.exe || exit /b 0
+          echo ==== where py.exe ====
+          where py.exe || exit /b 0
+          echo ==== python version ====
+          python --version || exit /b 0
+          echo ==== py version ====
+          py -3 --version || exit /b 0
+
+      - name: Test launcher
+        shell: cmd
+        run: |
+          set PARALLEL_BACKUP_TEST=1
+          call ParallelBackup.bat
+
+      - name: Verify app syntax
+        shell: cmd
+        run: |
+          py -3 -m py_compile app.py
