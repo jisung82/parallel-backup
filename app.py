@@ -133,11 +133,13 @@ def save_json_atomic(path: Path, data):
     os.replace(temp, path)
 
 
-def sha256_file(path: Path) -> str:
+def sha256_file(path: Path, work_callback=None) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+            if work_callback is not None:
+                work_callback(len(chunk))
     return digest.hexdigest()
 
 
@@ -162,16 +164,23 @@ def create_zip_archive(
             if cancel_event.is_set():
                 raise RuntimeError("ZIP 생성이 취소되었습니다.")
 
-            size = path.stat().st_size
-            with path.open("rb") as source_handle:
-                data = source_handle.read()
-            archive.writestr(
-                path.relative_to(snapshot).as_posix(),
-                data,
-            )
+            with (
+                path.open("rb") as source_handle,
+                archive.open(
+                    path.relative_to(snapshot).as_posix(),
+                    "w",
+                ) as target_handle,
+            ):
+                while True:
+                    chunk = source_handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    target_handle.write(chunk)
+                    if work_callback is not None:
+                        work_callback(len(chunk))
+
             progress_callback()
-            if work_callback is not None:
-                work_callback(size)
+
 
 
 def verify_zip_archive(
@@ -476,6 +485,7 @@ def verify_snapshot_fast(
     manifest: dict,
     progress_callback,
     cancel_event,
+    work_callback=None,
 ):
     for rel, info in manifest["files"].items():
         if cancel_event.is_set():
@@ -495,10 +505,18 @@ def verify_snapshot_fast(
                 f"파일 크기 불일치: {rel} "
                 f"(source={source_size}, backup={snapshot_size})"
             )
+        if work_callback is not None:
+            work_callback(1)
         progress_callback()
 
 
-def verify_snapshot_sha256(snapshot: Path, manifest: dict, progress_callback, cancel_event):
+def verify_snapshot_sha256(
+    snapshot: Path,
+    manifest: dict,
+    progress_callback,
+    cancel_event,
+    work_callback=None,
+):
     for rel, info in manifest["files"].items():
         if cancel_event.is_set():
             raise RuntimeError("검증 대상 검사가 취소되었습니다.")
@@ -507,7 +525,7 @@ def verify_snapshot_sha256(snapshot: Path, manifest: dict, progress_callback, ca
         if not path.is_file():
             raise FileNotFoundError(f"검증 대상이 없음: {rel}")
 
-        actual = sha256_file(path)
+        actual = sha256_file(path, work_callback=work_callback)
         if actual != info["sha256"]:
             raise IOError(
                 f"SHA-256 불일치: {rel} "
@@ -2895,7 +2913,14 @@ class ParallelBackupApp:
             self._set_timeline_stage(4)
 
             archive_size = master_archive.stat().st_size
-            master_sha256 = sha256_file(master_archive) if deep_scan else None
+            if deep_scan:
+                self._set_eta_stage("ZIP SHA-256 계산", archive_size)
+                master_sha256 = sha256_file(
+                    master_archive,
+                    work_callback=self._advance_eta_work,
+                )
+            else:
+                master_sha256 = None
 
             self.write_log(
                 f"[MASTER ZIP] {archive_name} "
@@ -3102,6 +3127,23 @@ class ParallelBackupApp:
 
         copied = 0
         reused = 0
+        snapshot_work_total = sum(
+            info["size"]
+            for rel, info in source_data["files"].items()
+            if not (
+                incremental
+                and previous_files.get(rel)
+                and (staging_root / Path(rel)).is_file()
+                and previous_files[rel].get("size") == info["size"]
+                and previous_files[rel].get("mtime_ns") == info["mtime_ns"]
+                and previous_files[rel].get("ctime_ns") == info["ctime_ns"]
+                and (
+                    not deep_scan
+                    or previous_files[rel].get("sha256") == info["sha256"]
+                )
+            )
+        )
+        self._set_eta_stage("스냅샷 구성", snapshot_work_total)
 
         for rel, info in source_data["files"].items():
             if self.cancel_event.is_set():
@@ -3126,8 +3168,19 @@ class ParallelBackupApp:
             if can_reuse:
                 reused += 1
             else:
+                snapshot_work_total += info["size"]
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
+                with (
+                    src.open("rb") as source_handle,
+                    dst.open("wb") as target_handle,
+                ):
+                    while True:
+                        chunk = source_handle.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        target_handle.write(chunk)
+                        self._advance_eta_work(len(chunk))
+                shutil.copystat(src, dst)
                 copied += 1
 
             self.advance_progress()
@@ -3192,23 +3245,35 @@ class ParallelBackupApp:
             )[1]
         )
 
-        self._set_operation(f"ZIP 압축 중 · {archive_name}")
+        zip_source_bytes = sum(
+            info["size"] for info in source_data["files"].values()
+        )
+        self._set_operation(
+            f"ZIP 압축 중 · {archive_name}"
+        )
         self._set_timeline_stage(3)
+        self._set_eta_stage("ZIP 압축", zip_source_bytes)
         create_zip_archive(
             staging_root,
             archive_path,
             self.advance_progress,
             self.cancel_event,
+            self._advance_eta_work,
         )
 
-        self._set_operation(f"ZIP 무결성 검사 중 · {archive_name}")
+        archive_size = archive_path.stat().st_size
+        self._set_operation(
+            f"ZIP 무결성 검사 중 · {archive_name}"
+        )
         self._set_timeline_stage(4)
+        self._set_eta_stage("ZIP 검증", archive_size)
         verify_zip_archive(
             archive_path,
             manifest,
             self.advance_progress,
             self.cancel_event,
             deep_scan,
+            self._advance_eta_work,
         )
 
         self.write_log(
@@ -3245,7 +3310,17 @@ class ParallelBackupApp:
                 f"[COPY] {master_archive.name} -> {destination}"
             )
 
-            shutil.copy2(master_archive, partial)
+            with (
+                master_archive.open("rb") as source_handle,
+                partial.open("wb") as target_handle,
+            ):
+                while True:
+                    chunk = source_handle.read(4 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    target_handle.write(chunk)
+                    self._advance_eta_work(len(chunk))
+            shutil.copystat(master_archive, partial)
             self.advance_progress()
 
             if partial.stat().st_size != master_archive.stat().st_size:
@@ -3421,6 +3496,7 @@ class ParallelBackupApp:
                             )
 
                         restored += 1
+                        self._advance_eta_work(1)
                         self.advance_progress()
             else:
                 for rel in manifest["files"]:
@@ -3441,6 +3517,7 @@ class ParallelBackupApp:
                     )
                     shutil.copy2(source_file, target_file)
                     restored += 1
+                    self._advance_eta_work(1)
                     self.advance_progress()
 
             verify_snapshot_sha256(
