@@ -3,12 +3,15 @@ import hashlib
 import html
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
 import time
 import tempfile
 import uuid
+import urllib.error
+import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -18,7 +21,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
 APP_TITLE = "Parallel Backup"
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.6.0"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
@@ -26,6 +29,9 @@ SOURCE_CACHE_FILE = "source_cache.json"
 PROFILE_FILE = "profile.json"
 STALE_PARTIAL_SECONDS = 24 * 60 * 60
 DEFAULT_FREE_SPACE_RESERVE = 64 * 1024 * 1024
+UPDATE_APP_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/app.py"
+UPDATE_BAT_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/ParallelBackup.bat"
+UPDATE_ICON_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/assets/parallel_backup.ico"
 
 
 def show_windows_notification(title, message):
@@ -601,6 +607,11 @@ class ParallelBackupApp:
         self.timeline_error = False
         self.timeline_success = False
 
+        self.shutdown_pending = False
+        self.update_available = False
+        self.latest_version = APP_VERSION
+        self.update_button = None
+
         self.destinations = []
         self.running = False
         self.cancel_event = threading.Event()
@@ -612,6 +623,12 @@ class ParallelBackupApp:
         self.build_ui()
         self.load_profile()
         self._refresh_metrics()
+        self.root.protocol("WM_DELETE_WINDOW", self.request_close)
+        self.root.after(1500, lambda: threading.Thread(
+            target=self.check_for_updates,
+            kwargs={"silent": True},
+            daemon=True,
+        ).start())
 
     def _setup_style(self):
         self.colors = {
@@ -785,6 +802,25 @@ class ParallelBackupApp:
             background=[
                 ("pressed", "#FFE4E6"),
                 ("active", "#FFF1F2"),
+            ],
+        )
+
+        style.configure(
+            "Update.TButton",
+            background=self.colors["soft_green"],
+            foreground="#047857",
+            borderwidth=0,
+            padding=(10, 8),
+            font=(self.font_family, 9, "bold"),
+        )
+        style.map(
+            "Update.TButton",
+            background=[
+                ("pressed", "#D1FAE5"),
+                ("active", "#DCFCE7"),
+            ],
+            foreground=[
+                ("active", "#065F46"),
             ],
         )
 
@@ -1134,6 +1170,256 @@ class ParallelBackupApp:
         self._build_compare_view()
         self.set_app_mode(self.app_mode_var.get())
 
+    def request_close(self):
+        if self.shutdown_pending:
+            return
+
+        if not self.running:
+            try:
+                self.save_profile(silent=True)
+            finally:
+                self.root.destroy()
+            return
+
+        confirmed = messagebox.askyesno(
+            "작업 중 종료",
+            "작업이 진행 중입니다.\n\n"
+            "종료하기 전에 현재 작업을 정지하고 안전하게 종료하시겠습니까?\n\n"
+            "파일 손상의 위험이 있습니다.",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+
+        self.shutdown_pending = True
+        self.cancel_event.set()
+        self.status_var.set("종료 준비 중...")
+        self._refresh_header()
+        self.write_log("[SHUTDOWN] 안전 종료 요청됨")
+
+        if self.update_button is not None:
+            self.update_button.configure(state="disabled")
+
+        self.root.after(200, self._finish_safe_shutdown)
+
+    def _finish_safe_shutdown(self):
+        if self.running:
+            self.root.after(200, self._finish_safe_shutdown)
+            return
+
+        try:
+            self.save_profile(silent=True)
+        finally:
+            self.root.destroy()
+
+    @staticmethod
+    def _parse_version(value):
+        match = re.search(
+            r"(\\d+)\\.(\\d+)\\.(\\d+)",
+            str(value),
+        )
+        if not match:
+            return (0, 0, 0)
+        return tuple(int(part) for part in match.groups())
+
+    def _fetch_remote_text(self, url):
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "ParallelBackup-Updater"},
+        )
+        with urllib.request.urlopen(request, timeout=8) as response:
+            return response.read().decode("utf-8")
+
+    def _download_update_file(self, url, path):
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "ParallelBackup-Updater"},
+        )
+        with urllib.request.urlopen(request, timeout=20) as response, path.open("wb") as target:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                target.write(chunk)
+
+    def _start_update(self, latest_version):
+        if self.running:
+            self.root.after(
+                0,
+                lambda: messagebox.showwarning(
+                    "업데이트",
+                    "작업 중에는 업데이트할 수 없습니다.\n작업이 끝난 뒤 다시 업데이트를 실행하세요.",
+                    parent=self.root,
+                ),
+            )
+            return
+
+        try:
+            import tempfile as _tempfile
+
+            update_dir = Path(
+                _tempfile.mkdtemp(prefix="parallel-backup-update-")
+            )
+            self._download_update_file(
+                UPDATE_APP_URL,
+                update_dir / "app.py",
+            )
+            self._download_update_file(
+                UPDATE_BAT_URL,
+                update_dir / "ParallelBackup.bat",
+            )
+
+            try:
+                self._download_update_file(
+                    UPDATE_ICON_URL,
+                    update_dir / "parallel_backup.ico",
+                )
+            except Exception:
+                pass
+
+            local_dir = Path(__file__).resolve().parent
+            updater = update_dir / "apply_update.bat"
+            pid = os.getpid()
+
+            updater.write_text(
+                "@echo off\\r\\n"
+                "setlocal\\r\\n"
+                "set \"APP_DIR=%~1\"\\r\\n"
+                "set \"UPDATE_DIR=%~2\"\\r\\n"
+                "set \"PID=%~3\"\\r\\n"
+                ":WAIT\\r\\n"
+                "tasklist /FI \"PID eq %PID%\" | find \"%PID%\" >nul\\r\\n"
+                "if not errorlevel 1 (\\r\\n"
+                "  timeout /t 1 /nobreak >nul\\r\\n"
+                "  goto WAIT\\r\\n"
+                ")\\r\\n"
+                "copy /Y \"%UPDATE_DIR%\\app.py\" \"%APP_DIR%\\app.py\" >nul\\r\\n"
+                "copy /Y \"%UPDATE_DIR%\\ParallelBackup.bat\" \"%APP_DIR%\\ParallelBackup.bat\" >nul\\r\\n"
+                "if exist \"%UPDATE_DIR%\\parallel_backup.ico\" (\\r\\n"
+                "  if not exist \"%APP_DIR%\\assets\" mkdir \"%APP_DIR%\\assets\"\\r\\n"
+                "  copy /Y \"%UPDATE_DIR%\\parallel_backup.ico\" \"%APP_DIR%\\assets\\parallel_backup.ico\" >nul\\r\\n"
+                ")\\r\\n"
+                "start \"\" \"%APP_DIR%\\ParallelBackup.bat\"\\r\\n"
+                "rmdir /S /Q \"%UPDATE_DIR%\" >nul 2>&1\\r\\n"
+                "del \"%~f0\" >nul 2>&1\\r\\n",
+                encoding="utf-8",
+            )
+
+            self.write_log(
+                f"[UPDATE] {APP_VERSION} -> {latest_version}"
+            )
+
+            subprocess.Popen(
+                [
+                    "cmd.exe",
+                    "/c",
+                    str(updater),
+                    str(local_dir),
+                    str(update_dir),
+                    str(pid),
+                ],
+                cwd=str(local_dir),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+
+            self.root.after(0, self.root.destroy)
+
+        except Exception as exc:
+            try:
+                if "update_dir" in locals():
+                    shutil.rmtree(update_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+            self.root.after(
+                0,
+                lambda error_text=str(exc): messagebox.showerror(
+                    "업데이트 실패",
+                    error_text,
+                    parent=self.root,
+                ),
+            )
+
+    def check_for_updates(self, silent=False):
+        def worker():
+            try:
+                remote_text = self._fetch_remote_text(UPDATE_APP_URL)
+                match = re.search(
+                    r'APP_VERSION\\s*=\\s*"([^"]+)"',
+                    remote_text,
+                )
+                if not match:
+                    raise RuntimeError("원격 APP_VERSION을 찾을 수 없습니다.")
+
+                latest = match.group(1)
+                self.latest_version = latest
+                available = (
+                    self._parse_version(latest)
+                    > self._parse_version(APP_VERSION)
+                )
+                self.update_available = available
+
+                def update_ui():
+                    if self.update_button is None:
+                        return
+
+                    if available:
+                        self.update_button.configure(
+                            text=f"업데이트 {latest}",
+                            style="Update.TButton",
+                            state="normal",
+                        )
+                        if not silent:
+                            confirmed = messagebox.askyesno(
+                                "새 버전",
+                                f"새 버전 {latest}을(를) 사용할 수 있습니다.\\n\\n"
+                                f"현재 버전: {APP_VERSION}\\n"
+                                f"최신 버전: {latest}\\n\\n"
+                                "지금 업데이트하시겠습니까?",
+                                parent=self.root,
+                            )
+                            if confirmed:
+                                threading.Thread(
+                                    target=self._start_update,
+                                    args=(latest,),
+                                    daemon=True,
+                                ).start()
+                    else:
+                        self.update_button.configure(
+                            text="최신 버전",
+                            style="Ghost.TButton",
+                            state="normal",
+                        )
+                        if not silent:
+                            messagebox.showinfo(
+                                "업데이트",
+                                f"현재 {APP_VERSION}이 최신 버전입니다.",
+                                parent=self.root,
+                            )
+
+                self.root.after(0, update_ui)
+
+            except Exception as exc:
+                error_text = str(exc)
+
+                def fail_ui():
+                    if self.update_button is not None:
+                        self.update_button.configure(
+                            text="업데이트 확인",
+                            style="Ghost.TButton",
+                            state="normal",
+                        )
+                    if not silent:
+                        messagebox.showerror(
+                            "업데이트 확인 실패",
+                            error_text,
+                            parent=self.root,
+                        )
+
+                self.root.after(0, fail_ui)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _build_backup_view(self):
         top = ttk.Frame(self.backup_view)
         top.pack(fill="x", pady=(0, 10))
@@ -1375,6 +1661,14 @@ class ParallelBackupApp:
             text="복구",
             command=self.restore_backup,
         ).pack(side="left")
+
+        self.update_button = ttk.Button(
+            action_row,
+            text="업데이트 확인",
+            command=self.check_for_updates,
+            style="Ghost.TButton",
+        )
+        self.update_button.pack(side="right", padx=(7, 0))
 
         ttk.Button(
             action_row,
@@ -3175,6 +3469,8 @@ class ParallelBackupApp:
                     dst.open("wb") as target_handle,
                 ):
                     while True:
+                        if cancel_event.is_set():
+                            raise RuntimeError("백업이 취소되었습니다.")
                         chunk = source_handle.read(1024 * 1024)
                         if not chunk:
                             break
@@ -3315,6 +3611,8 @@ class ParallelBackupApp:
                 partial.open("wb") as target_handle,
             ):
                 while True:
+                    if self.cancel_event.is_set():
+                        raise RuntimeError("백업이 취소되었습니다.")
                     chunk = source_handle.read(4 * 1024 * 1024)
                     if not chunk:
                         break
