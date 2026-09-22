@@ -18,7 +18,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
 APP_TITLE = "Parallel Backup"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
@@ -798,7 +798,7 @@ class ParallelBackupApp:
     def _gradient_header(self, parent):
         canvas = tk.Canvas(
             parent,
-            height=142,
+            height=118,
             bg=self.colors["primary"],
             highlightthickness=0,
             bd=0,
@@ -830,9 +830,8 @@ class ParallelBackupApp:
                 version = "#E0E7FF"
                 status_fg = self.colors["primary_dark"]
 
-            steps = max(2, width)
-            for x in range(steps):
-                t = x / max(1, steps - 1)
+            for x in range(max(2, width)):
+                t = x / max(1, width - 1)
                 color = "#{:02X}{:02X}{:02X}".format(
                     int(left[0] + (right[0] - left[0]) * t),
                     int(left[1] + (right[1] - left[1]) * t),
@@ -844,42 +843,52 @@ class ParallelBackupApp:
                 )
 
             canvas.create_oval(
-                width - 210, -90, width + 60, 180,
+                width - 190, -76, width + 45, 155,
                 fill=blob_right, outline=""
             )
             canvas.create_oval(
-                -80, 72, 120, 272,
+                -72, 58, 96, 224,
                 fill=blob_left, outline=""
             )
 
             canvas.create_text(
-                30, 28,
+                28, 23,
                 anchor="nw",
                 text="Parallel Backup",
                 fill="#FFFFFF",
-                font=(self.font_family, 24, "bold"),
+                font=(self.font_family, 23, "bold"),
             )
             canvas.create_text(
-                31, 67,
+                29, 57,
                 anchor="nw",
-                text="안전한 병렬 백업 · 중복 스냅샷 · SHA-256 검증",
+                text="안전한 병렬 백업 · ZIP 우선 저장 · SHA-256 검증",
                 fill=subtitle,
-                font=(self.font_family, 10),
+                font=(self.font_family, 9),
             )
 
-            status_text = self.compare_status_var.get() if compare else self.status_var.get()
+            status_text = (
+                self.compare_status_var.get()
+                if compare else self.status_var.get()
+            )
+            pill_x1 = width - 192
+            pill_x2 = width - 24
+            pill_y1 = 20
+            pill_y2 = 52
+
             canvas.create_rectangle(
-                width - 180, 27, width - 26, 61,
+                pill_x1, pill_y1, pill_x2, pill_y2,
                 fill="#FFFFFF", outline=""
             )
             canvas.create_text(
-                width - 103, 44,
+                (pill_x1 + pill_x2) / 2,
+                (pill_y1 + pill_y2) / 2,
                 text=status_text,
                 fill=status_fg,
-                font=(self.font_family, 9, "bold"),
+                font=(self.font_family, 8, "bold"),
             )
+
             canvas.create_text(
-                width - 30, 113,
+                width - 25, 91,
                 anchor="e",
                 text=f"v{APP_VERSION}",
                 fill=version,
@@ -896,26 +905,42 @@ class ParallelBackupApp:
             self._draw_header()
 
     def _metric_card(self, parent, title, value_var, accent):
-        wrapper, card = self._card(parent, padding=13)
-        ttk.Label(
-            card,
-            text=title.upper(),
-            background=self.colors["surface"],
-            foreground=self.colors["muted"],
-            font=(self.font_family, 8, "bold"),
-        ).pack(anchor="w")
-        value = ttk.Label(
-            card,
-            textvariable=value_var,
-            style="Metric.TLabel",
+        card = tk.Frame(
+            parent,
+            bg=self.colors["surface"],
+            highlightbackground=self.colors["border"],
+            highlightthickness=1,
+            width=94,
+            height=58,
         )
-        value.pack(anchor="w", pady=(3, 0))
+        card.pack_propagate(False)
+
+        top = tk.Frame(card, bg=self.colors["surface"])
+        top.pack(fill="x", padx=10, pady=(8, 0))
+
+        tk.Label(
+            top,
+            text=title.upper(),
+            bg=self.colors["surface"],
+            fg=self.colors["muted"],
+            font=(self.font_family, 7, "bold"),
+        ).pack(anchor="w")
+
+        tk.Label(
+            top,
+            textvariable=value_var,
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
+            font=(self.font_family, 17, "bold"),
+        ).pack(anchor="w")
+
         tk.Frame(
             card,
             bg=accent,
-            height=3,
-        ).pack(fill="x", pady=(8, 0))
-        return wrapper
+            height=2,
+        ).pack(fill="x", side="bottom")
+
+        return card
 
     def build_ui(self):
         self.root.title("Parallel Backup")
@@ -961,115 +986,92 @@ class ParallelBackupApp:
         self.scroll_canvas.bind("<Configure>", resize_content)
         self.root.bind_all("<MouseWheel>", self._on_mousewheel)
 
-        mode_row = tk.Frame(content, bg=self.colors["bg"])
-        mode_row.pack(fill="x", padx=14, pady=(12, 14))
+        mode_shell = tk.Frame(
+            content,
+            bg=self.colors["surface"],
+            highlightbackground=self.colors["border"],
+            highlightthickness=1,
+            bd=0,
+            height=72,
+        )
+        mode_shell.pack(fill="x", padx=14, pady=(10, 14))
+        mode_shell.pack_propagate(False)
         self.mode_cards = {}
 
         mode_specs = [
-            ("일반 백업", "일반 백업", "빠르고 안정적인 백업", "▣", self.colors["primary"]),
-            ("정밀 검사 백업", "정밀 검사 백업", "SHA-256으로 더 꼼꼼하게 검증", "✓", self.colors["danger"]),
-            ("파일 비교", "파일 비교", "두 폴더의 차이를 빠르게 확인", "↔", "#0F9D96"),
+            ("일반 백업", "일반", "빠르고 안정적", "▣", self.colors["primary"]),
+            ("정밀 검사 백업", "정밀 검사", "SHA-256 검증", "✓", self.colors["danger"]),
+            ("파일 비교", "파일 비교", "두 폴더 비교", "↔", "#0F9D96"),
         ]
 
-        for key, title, desc, icon, color in mode_specs:
+        for index, (key, title, desc, icon, color) in enumerate(mode_specs):
             card = tk.Frame(
-                mode_row,
+                mode_shell,
                 bg=self.colors["surface"],
-                highlightbackground=self.colors["border"],
-                highlightthickness=1,
-                bd=0,
                 cursor="hand2",
-                height=92,
+                bd=0,
             )
             card.pack(
                 side="left",
                 fill="both",
                 expand=True,
-                padx=4,
             )
-            card.pack_propagate(False)
+            if index > 0:
+                tk.Frame(
+                    mode_shell,
+                    bg=self.colors["border"],
+                    width=1,
+                ).pack(side="left", fill="y")
 
-            accent = tk.Frame(card, bg=color, width=4)
-            accent.pack(side="left", fill="y")
-
-            icon_wrap = tk.Frame(
+            icon_box = tk.Label(
                 card,
-                bg=(
-                    "#FEF2F2"
-                    if color == self.colors["danger"]
-                    else "#ECFEFF"
-                    if color == "#0F9D96"
-                    else self.colors["soft_indigo"]
-                ),
-                width=56,
-                height=56,
-            )
-            icon_wrap.pack(side="left", padx=(12, 10), pady=17)
-            icon_wrap.pack_propagate(False)
-
-            icon_circle = tk.Label(
-                icon_wrap,
                 text=icon,
-                bg=color,
-                fg="#FFFFFF",
-                font=(self.font_family, 16, "bold"),
-                width=2,
+                bg=self.colors["soft_indigo"] if key == "일반 백업"
+                else "#FEF2F2" if key == "정밀 검사 백업"
+                else "#ECFEFF",
+                fg=color,
+                font=(self.font_family, 12, "bold"),
+                width=3,
                 height=1,
                 cursor="hand2",
             )
-            icon_circle.place(relx=0.5, rely=0.5, anchor="center")
+            icon_box.pack(side="left", padx=(13, 9), pady=12)
 
-            text_frame = tk.Frame(
-                card,
-                bg=self.colors["surface"],
-            )
-            text_frame.pack(
-                side="left",
-                fill="both",
-                expand=True,
-                pady=16,
-                padx=(0, 12),
-            )
+            text_box = tk.Frame(card, bg=self.colors["surface"])
+            text_box.pack(side="left", fill="both", expand=True, pady=11)
 
             title_label = tk.Label(
-                text_frame,
+                text_box,
                 text=title,
                 bg=self.colors["surface"],
                 fg=color,
-                font=(self.font_family, 11, "bold"),
+                font=(self.font_family, 10, "bold"),
                 cursor="hand2",
             )
             title_label.pack(anchor="w")
 
             desc_label = tk.Label(
-                text_frame,
+                text_box,
                 text=desc,
                 bg=self.colors["surface"],
                 fg=self.colors["muted"],
                 font=(self.font_family, 8),
                 cursor="hand2",
             )
-            desc_label.pack(anchor="w", pady=(4, 0))
+            desc_label.pack(anchor="w", pady=(1, 0))
 
             self.mode_cards[key] = {
                 "frame": card,
-                "accent": accent,
-                "icon_wrap": icon_wrap,
-                "icon": icon_circle,
+                "icon_wrap": icon_box,
+                "icon": icon_box,
                 "title": title_label,
                 "text": desc_label,
-                "text_frame": text_frame,
+                "text_frame": text_box,
                 "color": color,
             }
 
             for widget in (
-                card,
-                accent,
-                icon_wrap,
-                icon_circle,
-                text_frame,
-                title_label,
-                desc_label,
+                card, icon_box, text_box, title_label, desc_label
             ):
                 widget.bind(
                     "<Button-1>",
@@ -1089,14 +1091,14 @@ class ParallelBackupApp:
 
     def _build_backup_view(self):
         top = ttk.Frame(self.backup_view)
-        top.pack(fill="x", pady=(0, 12))
+        top.pack(fill="x", pady=(0, 10))
 
         intro = ttk.Frame(top)
         intro.pack(side="left", fill="x", expand=True)
         ttk.Label(
             intro,
             text="백업 작업",
-            font=(self.font_family, 16, "bold"),
+            font=(self.font_family, 18, "bold"),
             foreground=self.colors["text"],
         ).pack(anchor="w")
         ttk.Label(
@@ -1110,7 +1112,7 @@ class ParallelBackupApp:
         self.metric_parallel = tk.StringVar(value=str(self.parallel_var.get()))
 
         metrics = ttk.Frame(top)
-        metrics.pack(side="right")
+        metrics.pack(side="right", pady=(1, 0))
 
         self._metric_card(
             metrics, "Targets", self.metric_targets, self.colors["primary"]
@@ -1128,7 +1130,7 @@ class ParallelBackupApp:
         grid.columnconfigure(1, weight=1)
         grid.rowconfigure(1, weight=1)
 
-        wrapper, source_card = self._card(grid, padding=17)
+        wrapper, source_card = self._card(grid, padding=15)
         wrapper.grid(row=0, column=0, sticky="nsew", padx=(0, 7), pady=(0, 10))
         ttk.Label(
             source_card,
@@ -1449,11 +1451,11 @@ class ParallelBackupApp:
         )
         self.progress.pack(fill="x")
 
-        timeline_wrapper, timeline_card = self._card(self.backup_view, padding=12)
+        timeline_wrapper, timeline_card = self._card(self.backup_view, padding=10)
         timeline_wrapper.pack(fill="x", pady=(0, 9))
         self.timeline_canvas = tk.Canvas(
             timeline_card,
-            height=132,
+            height=116,
             bg=self.colors["surface"],
             highlightthickness=0,
             bd=0,
@@ -1462,7 +1464,7 @@ class ParallelBackupApp:
         self.timeline_canvas.bind("<Configure>", self._draw_timeline)
         self.root.after_idle(self._draw_timeline)
 
-        log_wrapper, log_card = self._card(self.backup_view, padding=13)
+        log_wrapper, log_card = self._card(self.backup_view, padding=11)
         log_wrapper.pack(fill="both", expand=True)
         ttk.Label(
             log_card,
@@ -1486,7 +1488,7 @@ class ParallelBackupApp:
 
         self.log = tk.Text(
             log_holder,
-            height=8,
+            height=7,
             state="disabled",
             wrap="word",
             bg="#FAFBFF",
@@ -2090,11 +2092,8 @@ class ParallelBackupApp:
                     if key == "파일 비교"
                     else self.colors["soft_indigo"]
                 )
-                card["frame"].configure(
-                    bg=tint,
-                    highlightbackground=color,
-                    highlightthickness=2,
-                )
+                card["frame"].configure(bg=tint)
+
                 card["icon_wrap"].configure(bg=tint)
                 card["title"].configure(
                     bg=tint,
