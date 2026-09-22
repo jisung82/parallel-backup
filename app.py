@@ -1193,6 +1193,8 @@ class ParallelBackupApp:
 
         self.shutdown_pending = True
         self.cancel_event.set()
+        if hasattr(self, "compare_cancel_event"):
+            self.compare_cancel_event.set()
         self.status_var.set("종료 준비 중...")
         self._refresh_header()
         self.write_log("[SHUTDOWN] 안전 종료 요청됨")
@@ -2354,6 +2356,13 @@ class ParallelBackupApp:
             summary={"same":same,"different":different,"left_only":left_only,"right_only":right_only}
             self._set_compare_timeline(4)
             def finish():
+                if self.shutdown_pending:
+                    self._stop_compare_timer()
+                    self.running = False
+                    self.write_log("[SHUTDOWN] 파일 비교 정리 완료")
+                    self.root.after(0, self._finish_safe_shutdown)
+                    return
+
                 self.compare_summary=summary
                 for key,var in self.compare_summary_labels.items():var.set(f"{summary[key]:,}")
                 for item in self.compare_tree.get_children():self.compare_tree.delete(item)
@@ -2379,6 +2388,13 @@ class ParallelBackupApp:
             error_text=str(exc)
             self._compare_log(f"[FAIL] {error_text}")
             def fail():
+                if self.shutdown_pending:
+                    self._stop_compare_timer()
+                    self.running = False
+                    self.write_log("[SHUTDOWN] 파일 비교 정리 완료")
+                    self.root.after(0, self._finish_safe_shutdown)
+                    return
+
                 self.compare_status_var.set(f"실패 · {error_text}")
                 self._set_compare_timeline(2,error=True)
                 self._stop_compare_timer()
@@ -3265,6 +3281,11 @@ class ParallelBackupApp:
                 elapsed_text = self._format_elapsed(self.last_elapsed_seconds)
                 self._stop_operation_timer()
 
+                if self.shutdown_pending:
+                    self.write_log("[SHUTDOWN] 백업 정리 완료")
+                    self.root.after(0, self._finish_safe_shutdown)
+                    return
+
                 if failed == 0:
                     self._set_timeline_stage(6, success=True)
                     self.status_var.set(
@@ -3309,6 +3330,12 @@ class ParallelBackupApp:
                 self.cancel_button.configure(state="disabled")
                 elapsed_text = self._format_elapsed(self.last_elapsed_seconds)
                 self._stop_operation_timer()
+
+                if self.shutdown_pending:
+                    self.write_log("[SHUTDOWN] 백업 정리 완료")
+                    self.root.after(0, self._finish_safe_shutdown)
+                    return
+
                 self._set_timeline_stage(
                     max(0, self.timeline_current),
                     error=True,
@@ -3834,6 +3861,12 @@ class ParallelBackupApp:
                     self.last_elapsed_seconds
                 )
                 self._stop_operation_timer()
+
+                if self.shutdown_pending:
+                    self.write_log("[SHUTDOWN] 복구 정리 완료")
+                    self.root.after(0, self._finish_safe_shutdown)
+                    return
+
                 self.status_var.set(
                     f"복구 완료: {restored:,}개"
                 )
@@ -3867,6 +3900,12 @@ class ParallelBackupApp:
                     self.last_elapsed_seconds
                 )
                 self._stop_operation_timer()
+
+                if self.shutdown_pending:
+                    self.write_log("[SHUTDOWN] 복구 정리 완료")
+                    self.root.after(0, self._finish_safe_shutdown)
+                    return
+
                 self.status_var.set("복구 실패")
                 show_windows_notification(
                     "Parallel Backup · 복구 실패",
