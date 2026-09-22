@@ -18,7 +18,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
 APP_TITLE = "Parallel Backup"
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
@@ -141,7 +141,13 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def create_zip_archive(snapshot: Path, archive_path: Path, progress_callback, cancel_event):
+def create_zip_archive(
+    snapshot: Path,
+    archive_path: Path,
+    progress_callback,
+    cancel_event,
+    work_callback=None,
+):
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(
         archive_path,
@@ -149,15 +155,23 @@ def create_zip_archive(snapshot: Path, archive_path: Path, progress_callback, ca
         compression=zipfile.ZIP_DEFLATED,
         compresslevel=6,
     ) as archive:
-        files = [
-            path for path in snapshot.rglob("*")
-            if path.is_file()
-        ]
-        for path in files:
+        for path in (
+            item for item in snapshot.rglob("*")
+            if item.is_file()
+        ):
             if cancel_event.is_set():
                 raise RuntimeError("ZIP 생성이 취소되었습니다.")
-            archive.write(path, path.relative_to(snapshot).as_posix())
+
+            size = path.stat().st_size
+            with path.open("rb") as source_handle:
+                data = source_handle.read()
+            archive.writestr(
+                path.relative_to(snapshot).as_posix(),
+                data,
+            )
             progress_callback()
+            if work_callback is not None:
+                work_callback(size)
 
 
 def verify_zip_archive(
@@ -166,36 +180,45 @@ def verify_zip_archive(
     progress_callback,
     cancel_event,
     deep_scan: bool,
+    work_callback=None,
 ):
     with zipfile.ZipFile(archive_path, mode="r") as archive:
-        bad_member = archive.testzip()
-        if bad_member is not None:
-            raise IOError(f"ZIP CRC 검증 실패: {bad_member}")
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            if cancel_event.is_set():
+                raise RuntimeError("ZIP 검증이 취소되었습니다.")
 
-        if deep_scan:
-            for rel, info in manifest["files"].items():
-                if cancel_event.is_set():
-                    raise RuntimeError("ZIP 검증이 취소되었습니다.")
-                try:
-                    with archive.open(rel, "r") as handle:
-                        digest = hashlib.sha256()
-                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            rel = info.filename
+            try:
+                with archive.open(info, "r") as handle:
+                    digest = hashlib.sha256() if deep_scan else None
+                    for chunk in iter(
+                        lambda: handle.read(1024 * 1024),
+                        b"",
+                    ):
+                        if digest is not None:
                             digest.update(chunk)
+                        if work_callback is not None:
+                            work_callback(len(chunk))
+
+                    if digest is not None and rel in manifest.get("files", {}):
                         actual = digest.hexdigest()
-                except KeyError:
-                    raise FileNotFoundError(f"ZIP에 파일 없음: {rel}")
+                        expected = manifest["files"][rel].get("sha256")
+                        if expected and actual != expected:
+                            raise IOError(
+                                f"ZIP SHA-256 불일치: {rel} "
+                                f"(expected={expected}, actual={actual})"
+                            )
+            except KeyError:
+                raise FileNotFoundError(f"ZIP에 파일 없음: {rel}")
 
-                if actual != info["sha256"]:
-                    raise IOError(
-                        f"ZIP SHA-256 불일치: {rel} "
-                        f"(expected={info['sha256']}, actual={actual})"
-                    )
-                progress_callback()
+            progress_callback()
 
-    manifest_member = MANIFEST_DIR + "/" + MANIFEST_FILE
-    with zipfile.ZipFile(archive_path, mode="r") as archive:
+        manifest_member = MANIFEST_DIR + "/" + MANIFEST_FILE
         if manifest_member not in archive.namelist():
             raise FileNotFoundError("ZIP 내부 manifest.json이 없습니다.")
+
 
 
 def normalize_patterns(raw: str):
@@ -527,6 +550,10 @@ class ParallelBackupApp:
         self.operation_started_at = None
         self.elapsed_job = None
         self.last_elapsed_seconds = 0
+        self.eta_stage_name = ""
+        self.eta_stage_total = 0
+        self.eta_stage_done = 0
+        self.eta_samples = []
 
         self.compare_source_var = tk.StringVar()
         self.compare_target_var = tk.StringVar()
@@ -2339,39 +2366,67 @@ class ParallelBackupApp:
         self._stop_operation_timer()
         self.operation_started_at = time.monotonic()
         self.last_elapsed_seconds = 0
+        self.eta_stage_name = ""
+        self.eta_stage_total = 0
+        self.eta_stage_done = 0
+        self.eta_samples = []
         self.elapsed_var.set("경과 00:00:00")
         self.eta_var.set("예상 계산 중...")
         self.elapsed_job = self.root.after(2000, self._update_elapsed)
+
+    def _set_eta_stage(self, name, total_work):
+        self.eta_stage_name = name
+        self.eta_stage_total = max(0, int(total_work))
+        self.eta_stage_done = 0
+        self.eta_samples = [(time.monotonic(), 0)]
+
+    def _advance_eta_work(self, amount):
+        if amount > 0:
+            self.eta_stage_done = min(
+                self.eta_stage_total,
+                self.eta_stage_done + int(amount),
+            )
 
     def _update_elapsed(self):
         if self.operation_started_at is None:
             self.elapsed_job = None
             return
 
-        self.last_elapsed_seconds = time.monotonic() - self.operation_started_at
+        now = time.monotonic()
+        self.last_elapsed_seconds = now - self.operation_started_at
         self.elapsed_var.set(
             f"경과 {self._format_elapsed(self.last_elapsed_seconds)}"
         )
 
-        remaining = max(0, self.progress_total - self.progress_value)
-        if (
-            self.progress_value > 0
-            and self.progress_total > self.progress_value
-            and self.last_elapsed_seconds >= 2
-        ):
-            rate = self.progress_value / self.last_elapsed_seconds
-            if rate > 0:
-                eta_seconds = remaining / rate
-                self.eta_var.set(
-                    f"예상 {self._format_elapsed(eta_seconds)}"
-                )
-            else:
-                self.eta_var.set("예상 계산 중...")
-        elif self.progress_total > 0 and self.progress_value >= self.progress_total:
-            self.eta_var.set("예상 00:00:00")
-        else:
-            self.eta_var.set("예상 계산 중...")
+        self.eta_samples.append((now, self.eta_stage_done))
+        cutoff = now - 10.0
+        self.eta_samples = [
+            sample for sample in self.eta_samples
+            if sample[0] >= cutoff
+        ]
 
+        eta_text = "예상 계산 중..."
+        if (
+            self.eta_stage_total > 0
+            and self.eta_stage_done < self.eta_stage_total
+            and len(self.eta_samples) >= 2
+        ):
+            start_time, start_work = self.eta_samples[0]
+            end_time, end_work = self.eta_samples[-1]
+            window_seconds = end_time - start_time
+            window_work = end_work - start_work
+            if window_seconds >= 2 and window_work > 0:
+                rate = window_work / window_seconds
+                remaining = self.eta_stage_total - self.eta_stage_done
+                eta_seconds = remaining / rate
+                eta_text = f"예상 {self._format_elapsed(eta_seconds)}"
+        elif (
+            self.eta_stage_total > 0
+            and self.eta_stage_done >= self.eta_stage_total
+        ):
+            eta_text = "예상 00:00:00"
+
+        self.eta_var.set(eta_text)
         self.elapsed_job = self.root.after(2000, self._update_elapsed)
 
     def _stop_operation_timer(self):
