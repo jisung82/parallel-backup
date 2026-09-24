@@ -5,6 +5,7 @@ on:
     paths:
       - "ParallelBackup.bat"
       - "app.py"
+      - "tests/**"
       - ".github/workflows/test-windows-bat.yml"
   workflow_dispatch:
 
@@ -26,6 +27,11 @@ jobs:
           echo ==== py version ====
           py -3 --version || exit /b 0
 
+      - name: Install static test tools
+        shell: cmd
+        run: |
+          py -3 -m pip install --disable-pip-version-check pytest pyflakes
+
       - name: Test launcher
         shell: cmd
         run: |
@@ -36,3 +42,13 @@ jobs:
         shell: cmd
         run: |
           py -3 -m py_compile app.py
+
+      - name: Run regression tests
+        shell: cmd
+        run: |
+          py -3 -m pytest -q tests
+
+      - name: Check undefined names
+        shell: cmd
+        run: |
+          py -3 -m pyflakes app.py
