@@ -24,7 +24,8 @@ if "%PARALLEL_BACKUP_TEST%"=="1" goto TEST_PY
 echo Python launcher found.
 echo Starting Parallel Backup...
 echo.
-py -3 "%~dp0app.py"
+py -3 "%~dp0parallel_backup_launcher.py"
+set "APP_EXIT=%errorlevel%"
 goto SHOW_RESULT
 
 :USE_PYTHON
@@ -32,7 +33,8 @@ if "%PARALLEL_BACKUP_TEST%"=="1" goto TEST_PYTHON
 echo python.exe found.
 echo Starting Parallel Backup...
 echo.
-python "%~dp0app.py"
+python "%~dp0parallel_backup_launcher.py"
+set "APP_EXIT=%errorlevel%"
 goto SHOW_RESULT
 
 :TEST_PY
@@ -41,7 +43,11 @@ py -3 --version
 if errorlevel 1 goto TEST_FAILED
 py -3 -m py_compile "%~dp0app.py"
 if errorlevel 1 goto TEST_FAILED
-echo [PASS] BAT and app.py test passed.
+py -3 -m py_compile "%~dp0parallel_backup_launcher.py"
+if errorlevel 1 goto TEST_FAILED
+py -3 -m pytest -q "%~dp0tests"
+if errorlevel 1 goto TEST_FAILED
+echo [PASS] BAT, app.py, launcher and regression tests passed.
 exit /b 0
 
 :TEST_PYTHON
@@ -50,21 +56,25 @@ python --version
 if errorlevel 1 goto TEST_FAILED
 python -m py_compile "%~dp0app.py"
 if errorlevel 1 goto TEST_FAILED
-echo [PASS] BAT and app.py test passed.
-goto END
+python -m py_compile "%~dp0parallel_backup_launcher.py"
+if errorlevel 1 goto TEST_FAILED
+python -m pytest -q "%~dp0tests"
+if errorlevel 1 goto TEST_FAILED
+echo [PASS] BAT, app.py, launcher and regression tests passed.
+exit /b 0
 
 :TEST_FAILED
-echo [FAIL] BAT or app.py test failed.
+echo [FAIL] BAT or Python regression test failed.
 exit /b 1
 
 :SHOW_RESULT
 echo.
 echo ==========================================
-echo Exit code: %errorlevel%
+echo Exit code: %APP_EXIT%
 echo ==========================================
 echo.
 
 :END
 echo Press any key to close this window...
 pause >nul
-exit /b 0
+exit /b %APP_EXIT%
