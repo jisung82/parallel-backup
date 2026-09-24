@@ -3496,7 +3496,7 @@ class ParallelBackupApp:
                     dst.open("wb") as target_handle,
                 ):
                     while True:
-                        if cancel_event.is_set():
+                        if self.cancel_event.is_set():
                             raise RuntimeError("백업이 취소되었습니다.")
                         chunk = source_handle.read(1024 * 1024)
                         if not chunk:
