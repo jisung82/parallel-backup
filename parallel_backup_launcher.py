@@ -1,9 +1,8 @@
 """Stable launcher for Parallel Backup.
 
-The GUI lives in app.py. This launcher patches the backup engine so large ZIP
-construction never uses the system TEMP directory for a full staging copy.
-ZIPs are built directly in the first backup destination as a hidden .partial
-file, verified, and then atomically promoted/copies to the other destinations.
+The GUI lives in app.py. This launcher replaces the large-file backup engine:
+ZIP construction happens directly in the first backup destination. The system
+TEMP directory is never used for a full staging copy or a master ZIP.
 """
 
 import json
@@ -23,6 +22,7 @@ import app
 BUILD_PREFIX = ".parallel-backup-build-"
 BUILD_STALE_SECONDS = 24 * 60 * 60
 RESERVE_BYTES = 64 * 1024 * 1024
+CHUNK_SIZE = 1024 * 1024
 
 
 def _cleanup_build_partials(destination: Path) -> None:
@@ -33,9 +33,8 @@ def _cleanup_build_partials(destination: Path) -> None:
         if not item.name.startswith(BUILD_PREFIX):
             continue
         try:
-            if now - item.stat().st_mtime > BUILD_STALE_SECONDS:
-                if item.is_file():
-                    item.unlink(missing_ok=True)
+            if now - item.stat().st_mtime > BUILD_STALE_SECONDS and item.is_file():
+                item.unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -54,7 +53,7 @@ def _copy_stream(source_handle, target_handle, cancel_event, work_callback):
     while True:
         if cancel_event.is_set():
             raise RuntimeError("ZIP 생성이 취소되었습니다.")
-        chunk = source_handle.read(1024 * 1024)
+        chunk = source_handle.read(CHUNK_SIZE)
         if not chunk:
             return
         target_handle.write(chunk)
@@ -67,9 +66,89 @@ def _estimate_archive_size(source_size: int, previous_archive: Path | None, prev
         old_source = previous_manifest.get("stats", {}).get("source_bytes")
         if old_source and old_source > 0:
             ratio = previous_archive.stat().st_size / old_source
-            # Keep a conservative floor and cap the estimate at the source size.
-            return max(256 * 1024 * 1024, min(source_size, int(source_size * ratio * 1.15)))
+            return max(
+                256 * 1024 * 1024,
+                min(source_size, int(source_size * ratio * 1.15)),
+            )
     return source_size
+
+
+def verify_zip_archive_strict(
+    archive_path: Path,
+    manifest: dict,
+    progress_callback,
+    cancel_event,
+    deep_scan: bool,
+    work_callback=None,
+):
+    """Verify ZIP integrity and manifest completeness in both backup modes."""
+    expected = manifest.get("files", {})
+    expected_names = {_safe_archive_member(rel) for rel in expected}
+    manifest_member = f"{app.MANIFEST_DIR}/{app.MANIFEST_FILE}"
+
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        bad = archive.testzip()
+        if bad is not None:
+            raise IOError(f"ZIP CRC 오류: {bad}")
+
+        infos = archive.infolist()
+        names = [info.filename for info in infos if not info.is_dir()]
+        name_set = set(names)
+        if len(names) != len(name_set):
+            raise IOError("ZIP 내부 중복 파일명이 발견되었습니다.")
+
+        if manifest_member not in name_set:
+            raise FileNotFoundError("ZIP 내부 manifest.json이 없습니다.")
+
+        actual_names = name_set - {manifest_member}
+        missing = expected_names - actual_names
+        extra = actual_names - expected_names
+        if missing:
+            sample = ", ".join(sorted(missing)[:5])
+            raise IOError(f"ZIP 파일 누락: {sample}")
+        if extra:
+            sample = ", ".join(sorted(extra)[:5])
+            raise IOError(f"manifest에 없는 ZIP 파일: {sample}")
+
+        for info in infos:
+            if info.is_dir() or info.filename == manifest_member:
+                continue
+            if cancel_event.is_set():
+                raise RuntimeError("ZIP 검증이 취소되었습니다.")
+
+            rel = _safe_archive_member(info.filename)
+            expected_info = expected.get(rel)
+            if expected_info is None:
+                raise IOError(f"manifest에 없는 ZIP 파일: {rel}")
+
+            expected_size = expected_info.get("size")
+            if expected_size is not None and info.file_size != expected_size:
+                raise IOError(
+                    f"ZIP 크기 불일치: {rel} "
+                    f"(expected={expected_size}, actual={info.file_size})"
+                )
+
+            with archive.open(info, "r") as handle:
+                digest = None
+                if deep_scan:
+                    import hashlib
+                    digest = hashlib.sha256()
+                for chunk in iter(lambda: handle.read(CHUNK_SIZE), b""):
+                    if digest is not None:
+                        digest.update(chunk)
+                    if work_callback is not None:
+                        work_callback(len(chunk))
+
+                if digest is not None:
+                    expected_hash = expected_info.get("sha256")
+                    actual_hash = digest.hexdigest()
+                    if expected_hash != actual_hash:
+                        raise IOError(
+                            f"ZIP SHA-256 불일치: {rel} "
+                            f"(expected={expected_hash}, actual={actual_hash})"
+                        )
+
+            progress_callback()
 
 
 def build_master_zip_no_temp(
@@ -99,6 +178,7 @@ def build_master_zip_no_temp(
 
     previous_archive = None
     previous_manifest = None
+    previous_names = set()
     if incremental:
         previous_archive, previous_manifest = app.find_latest_verified_archive(
             first_destination,
@@ -107,6 +187,8 @@ def build_master_zip_no_temp(
         )
         if previous_archive is not None:
             self.write_log(f"[INCREMENTAL] 기준 ZIP: {previous_archive.name}")
+            with zipfile.ZipFile(previous_archive, "r") as previous_zip:
+                previous_names = set(previous_zip.namelist())
         else:
             self.write_log("[INCREMENTAL] 기준 ZIP 없음 → 원본에서 직접 구성")
 
@@ -180,7 +262,7 @@ def build_master_zip_no_temp(
                             not deep_scan
                             or old.get("sha256") == info.get("sha256")
                         )
-                        and member in previous_zip.namelist()
+                        and member in previous_names
                     )
 
                     with out_zip.open(member, "w") as target_handle:
@@ -231,7 +313,7 @@ def build_master_zip_no_temp(
         self._set_timeline_stage(4)
         archive_size = archive_path.stat().st_size
         self._set_eta_stage("ZIP 검증", archive_size)
-        app.verify_zip_archive(
+        verify_zip_archive_strict(
             archive_path,
             manifest,
             self.advance_progress,
@@ -276,8 +358,6 @@ def copy_master_archive_no_temp(
     )
 
     try:
-        # The first destination already owns the verified build file.
-        # Promote it directly instead of making a second full ZIP copy.
         if master_archive.resolve().parent == destination.resolve():
             if deep_scan:
                 copied_sha256 = app.sha256_file(master_archive)
@@ -327,7 +407,6 @@ def copy_master_archive_no_temp(
         return {"ok": False, "destination": str(destination), "error": str(exc)}
 
 
-# Install the new engine before the GUI is constructed.
 app.ParallelBackupApp._build_master_zip = build_master_zip_no_temp
 app.ParallelBackupApp._copy_master_archive = copy_master_archive_no_temp
 
