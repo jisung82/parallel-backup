@@ -117,3 +117,8 @@ def test_callback_methods_exist():
                 )
 
     assert not missing, "\n".join(missing)
+
+
+# This file intentionally keeps the runtime NameError regression test enabled;
+# the legacy app.py path is still shipped for compatibility, while the BAT
+# launcher uses the no-TEMP engine.
