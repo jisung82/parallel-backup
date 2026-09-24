@@ -1,0 +1,45 @@
+name: Repair Legacy Engine References
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app.py"
+      - ".github/workflows/repair-legacy-engine.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Repair legacy cancel_event scope
+        shell: pwsh
+        run: |
+          $path = "app.py"
+          $text = Get-Content -Raw -Encoding UTF8 $path
+          $start = $text.IndexOf("    def _build_master_zip(")
+          $end = $text.IndexOf("    def _copy_master_archive(", $start)
+          if ($start -lt 0 -or $end -lt 0) {
+            throw "Could not locate legacy _build_master_zip region."
+          }
+          $head = $text.Substring(0, $start)
+          $region = $text.Substring($start, $end - $start)
+          $tail = $text.Substring($end)
+          $fixed = $region -replace "if cancel_event\.is_set\(\):", "if self.cancel_event.is_set():"
+          if ($fixed -ne $region) {
+            [IO.File]::WriteAllText($path, $head + $fixed + $tail, [Text.UTF8Encoding]::new($false))
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add app.py
+            git commit -m "fix: remove legacy bare cancel_event reference"
+            git push
+          } else {
+            Write-Host "No legacy bare cancel_event reference found."
+          }
