@@ -5,6 +5,7 @@ on:
     paths:
       - "ParallelBackup.bat"
       - "app.py"
+      - "parallel_backup_launcher.py"
       - "tests/**"
       - ".github/workflows/test-windows-bat.yml"
   workflow_dispatch:
@@ -38,17 +39,19 @@ jobs:
           set PARALLEL_BACKUP_TEST=1
           call ParallelBackup.bat
 
-      - name: Verify app syntax
+      - name: Verify all Python syntax
         shell: cmd
         run: |
           py -3 -m py_compile app.py
+          py -3 -m py_compile parallel_backup_launcher.py
+          py -3 -m compileall -q tests
 
       - name: Run regression tests
         shell: cmd
         run: |
           py -3 -m pytest -q tests
 
-      - name: Check undefined names
+      - name: Check undefined names in all project Python
         shell: cmd
         run: |
-          py -3 -m pyflakes app.py
+          py -3 -m pyflakes app.py parallel_backup_launcher.py tests
