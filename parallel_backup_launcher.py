@@ -5,9 +5,11 @@ ZIP construction happens directly in the first backup destination. The system
 TEMP directory is never used for a full staging copy or a master ZIP.
 """
 
+import hashlib
 import json
 import os
 import shutil
+import threading
 import time
 import uuid
 import zipfile
@@ -23,6 +25,20 @@ BUILD_PREFIX = ".parallel-backup-build-"
 BUILD_STALE_SECONDS = 24 * 60 * 60
 RESERVE_BYTES = 64 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
+LAUNCHER_VERSION = "1.6.1"
+
+
+def _install_cancel_event_compatibility() -> None:
+    """Prevent legacy app.py free-variable crashes.
+
+    Older downloaded app.py revisions contained a bare ``cancel_event`` in a
+    worker path even though the real event is stored on the application
+    instance.  The current launcher owns the backup engine, but this module
+    global is kept as a last-resort compatibility fallback so an old GUI
+    callback cannot crash with NameError before the launcher engine takes over.
+    """
+    if not hasattr(app, "cancel_event"):
+        app.cancel_event = threading.Event()
 
 
 def _cleanup_build_partials(destination: Path) -> None:
@@ -131,7 +147,6 @@ def verify_zip_archive_strict(
             with archive.open(info, "r") as handle:
                 digest = None
                 if deep_scan:
-                    import hashlib
                     digest = hashlib.sha256()
                 for chunk in iter(lambda: handle.read(CHUNK_SIZE), b""):
                     if digest is not None:
@@ -209,8 +224,8 @@ def build_master_zip_no_temp(
     manifest = {
         "version": 4,
         "app_version": app.APP_VERSION,
-        "source": str(source.resolve()),
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        "source": str(source.resolve()),
         "verified": True,
         "verification": "sha256" if deep_scan else "fast",
         "backup_name": Path(archive_name).stem,
@@ -407,6 +422,7 @@ def copy_master_archive_no_temp(
         return {"ok": False, "destination": str(destination), "error": str(exc)}
 
 
+_install_cancel_event_compatibility()
 app.ParallelBackupApp._build_master_zip = build_master_zip_no_temp
 app.ParallelBackupApp._copy_master_archive = copy_master_archive_no_temp
 
