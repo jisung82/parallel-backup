@@ -2930,7 +2930,6 @@ class ParallelBackupApp:
         canvas = self.timeline_canvas
         canvas.delete("all")
         width = max(700, canvas.winfo_width())
-        height = canvas.winfo_height()
         palette = self._timeline_palette()
 
         left = 50
