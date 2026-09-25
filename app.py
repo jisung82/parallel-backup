@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import subprocess
 import threading
 import time
@@ -593,7 +594,7 @@ class ParallelBackupApp:
         self.incremental_var = tk.BooleanVar(value=True)
         self.backup_mode_var = tk.StringVar(value="일반 백업")
         self.app_mode_var = tk.StringVar(value="일반 백업")
-        self.hardlink_var = tk.BooleanVar(value=True)
+        self.hardlink_var = tk.BooleanVar(value=False)
         self.parallel_var = tk.IntVar(value=3)
         self.keep_var = tk.IntVar(value=10)
         self.exclude_var = tk.StringVar()
@@ -1597,7 +1598,6 @@ class ParallelBackupApp:
 
         for row, (text_label, variable) in enumerate([
             ("증분 백업", self.incremental_var),
-            ("하드링크 재사용", self.hardlink_var),
         ]):
             ttk.Checkbutton(
                 option_grid,
@@ -2680,7 +2680,6 @@ class ParallelBackupApp:
             "destinations": self.destinations,
             "incremental": self.incremental_var.get(),
             "backup_mode": self.backup_mode_var.get(),
-            "hardlink": self.hardlink_var.get(),
             "app_mode": self.app_mode_var.get(),
             "parallel": self.parallel_var.get(),
             "keep": self.keep_var.get(),
@@ -2707,7 +2706,7 @@ class ParallelBackupApp:
 
         self._refresh_backup_mode_segment()
         self._refresh_header()
-        self.hardlink_var.set(profile.get("hardlink", True))
+        self.hardlink_var.set(False)
         self.parallel_var.set(int(profile.get("parallel", 3)))
         self.keep_var.set(int(profile.get("keep", 10)))
         self.exclude_var.set(profile.get("exclude", ""))
@@ -3489,11 +3488,9 @@ class ParallelBackupApp:
             or manifest.get("version") not in (2, 3, 4)
             or manifest.get("verified") is not True
         ):
-            messagebox.showerror(
-                "복구 오류",
-                "검증 완료된 Parallel Backup v2/v3/v4 백업이 아닙니다.",
+            target_text = filedialog.askdirectory(
+                title="복구 대상 폴더 선택"
             )
-            return
 
         try:
             normalized_files = {}
@@ -3516,7 +3513,7 @@ class ParallelBackupApp:
             try:
                 from backup_engine import verify_zip_archive_strict
                 verify_zip_archive_strict(
-                    __import__("app"),
+                    sys.modules[__name__],
                     backup,
                     manifest,
                     lambda: None,
