@@ -31,6 +31,7 @@ UPDATE_APP_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/mai
 UPDATE_BAT_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/ParallelBackup.bat"
 UPDATE_ICON_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/assets/parallel_backup.ico"
 UPDATE_LAUNCHER_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/parallel_backup_launcher.py"
+UPDATE_ENGINE_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/backup_engine.py"
 
 
 def show_windows_notification(title, message):
@@ -1301,6 +1302,10 @@ class ParallelBackupApp:
                 UPDATE_LAUNCHER_URL,
                 update_dir / "parallel_backup_launcher.py",
             )
+            self._download_update_file(
+                UPDATE_ENGINE_URL,
+                update_dir / "backup_engine.py",
+            )
 
             try:
                 self._download_update_file(
@@ -1329,6 +1334,7 @@ class ParallelBackupApp:
                 "copy /Y \"%UPDATE_DIR%\\app.py\" \"%APP_DIR%\\app.py\" >nul\\r\\n"
                 "copy /Y \"%UPDATE_DIR%\\ParallelBackup.bat\" \"%APP_DIR%\\ParallelBackup.bat\" >nul\\r\\n"
                 "copy /Y \"%UPDATE_DIR%\\parallel_backup_launcher.py\" \"%APP_DIR%\\parallel_backup_launcher.py\" >nul\\r\\n"
+                "copy /Y \"%UPDATE_DIR%\\backup_engine.py\" \"%APP_DIR%\\backup_engine.py\" >nul\\r\\n"
                 "if exist \"%UPDATE_DIR%\\parallel_backup.ico\" (\\r\\n"
                 "  if not exist \"%APP_DIR%\\assets\" mkdir \"%APP_DIR%\\assets\"\\r\\n"
                 "  copy /Y \"%UPDATE_DIR%\\parallel_backup.ico\" \"%APP_DIR%\\assets\\parallel_backup.ico\" >nul\\r\\n"
