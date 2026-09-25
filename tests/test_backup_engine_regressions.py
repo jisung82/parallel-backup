@@ -100,7 +100,7 @@ def test_strict_zip_verifier_detects_extra_member(tmp_path):
         "files": {
             "ok.txt": {
                 "size": 2,
-                "sha256": "2689367b205c16ce4303b3f1f8a8d8b7b2c8d3c7c5a3e8f6a6d8e0a5f8d0d5d"
+                "sha256": "2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df"
             }
         }
     }
