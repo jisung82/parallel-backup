@@ -171,7 +171,7 @@ def test_no_temp_engine_builds_directly_into_destination(tmp_path):
     )
 
     dummy = Dummy()
-    archive_path, archive_name, staging_root, manifest = build_master_zip(
+    archive_path, _archive_name, staging_root, manifest = build_master_zip(
         dummy,
         source,
         "test_20260926_000000",
