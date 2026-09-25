@@ -9,6 +9,14 @@ on:
       - "backup_engine.py"
       - "tests/**"
       - ".github/workflows/test-windows-bat.yml"
+  pull_request:
+    paths:
+      - "ParallelBackup.bat"
+      - "app.py"
+      - "parallel_backup_launcher.py"
+      - "backup_engine.py"
+      - "tests/**"
+      - ".github/workflows/test-windows-bat.yml"
   workflow_dispatch:
 
 jobs:
