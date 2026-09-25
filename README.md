@@ -34,7 +34,7 @@ Windows에서 사용하는 GUI 기반 병렬 백업 프로그램입니다.
 ### ZIP 아카이브 자동 생성
 - 검증된 ZIP을 각 백업 대상에 저장
 - ZIP 내부에도 `.parallel-backup/manifest.json`을 포함
-- 생성된 ZIP의 CRC와 파일별 SHA-256을 다시 검증한 뒤 최종 ZIP으로 확정
+- 생성된 ZIP의 CRC를 검증하고, 정밀 모드에서는 파일별 SHA-256도 검증한 뒤 최종 ZIP으로 확정
 - 기존 검증 ZIP은 다음 증분 백업의 기준으로 유지
 - 오래된 검증 ZIP은 보존 정책에 따라 삭제
 
