@@ -1285,11 +1285,10 @@ class ParallelBackupApp:
             return
 
         try:
-            import tempfile as _tempfile
-
-            update_dir = Path(
-                _tempfile.mkdtemp(prefix="parallel-backup-update-")
+            update_dir = local_app_dir() / (
+                f"update-{uuid.uuid4().hex}"
             )
+            update_dir.mkdir(parents=True, exist_ok=False)
             self._download_update_file(
                 UPDATE_APP_URL,
                 update_dir / "app.py",
@@ -1297,6 +1296,10 @@ class ParallelBackupApp:
             self._download_update_file(
                 UPDATE_BAT_URL,
                 update_dir / "ParallelBackup.bat",
+            )
+            self._download_update_file(
+                UPDATE_LAUNCHER_URL,
+                update_dir / "parallel_backup_launcher.py",
             )
 
             try:
@@ -1325,6 +1328,7 @@ class ParallelBackupApp:
                 ")\\r\\n"
                 "copy /Y \"%UPDATE_DIR%\\app.py\" \"%APP_DIR%\\app.py\" >nul\\r\\n"
                 "copy /Y \"%UPDATE_DIR%\\ParallelBackup.bat\" \"%APP_DIR%\\ParallelBackup.bat\" >nul\\r\\n"
+                "copy /Y \"%UPDATE_DIR%\\parallel_backup_launcher.py\" \"%APP_DIR%\\parallel_backup_launcher.py\" >nul\\r\\n"
                 "if exist \"%UPDATE_DIR%\\parallel_backup.ico\" (\\r\\n"
                 "  if not exist \"%APP_DIR%\\assets\" mkdir \"%APP_DIR%\\assets\"\\r\\n"
                 "  copy /Y \"%UPDATE_DIR%\\parallel_backup.ico\" \"%APP_DIR%\\assets\\parallel_backup.ico\" >nul\\r\\n"
@@ -3485,6 +3489,48 @@ class ParallelBackupApp:
             )
             return
 
+        try:
+            normalized_files = {}
+            for rel, info in manifest.get("files", {}).items():
+                normalized = _safe_archive_member(rel)
+                if normalized != rel.replace("\\", "/"):
+                    raise ValueError(f"비표준 복구 경로: {rel}")
+                if normalized in normalized_files:
+                    raise ValueError(f"중복 복구 경로: {rel}")
+                normalized_files[normalized] = info
+            manifest["files"] = normalized_files
+        except Exception as exc:
+            messagebox.showerror(
+                "복구 오류",
+                f"백업 경로 검증 실패:\n{exc}",
+            )
+            return
+
+        if is_archive:
+            try:
+                from backup_engine import verify_zip_archive_strict
+                verify_zip_archive_strict(
+                    __import__("app"),
+                    backup,
+                    manifest,
+                    lambda: None,
+                    threading.Event(),
+                    False,
+                    None,
+                )
+            except Exception as exc:
+                messagebox.showerror(
+                    "복구 오류",
+                    f"ZIP 무결성 검증 실패:\n{exc}",
+                )
+                return
+
+            messagebox.showerror(
+                "복구 오류",
+                "검증 완료된 Parallel Backup v2/v3/v4 백업이 아닙니다.",
+            )
+            return
+
         target_text = filedialog.askdirectory(
             title="복구 대상 폴더 선택"
         )
@@ -3541,11 +3587,12 @@ class ParallelBackupApp:
                         if self.cancel_event.is_set():
                             raise RuntimeError("복구가 취소되었습니다.")
 
-                        target_file = target / Path(rel)
+                        safe_rel = _safe_archive_member(rel)
+                        target_file = _safe_restore_path(target, safe_rel)
                         target_file.parent.mkdir(parents=True, exist_ok=True)
 
                         try:
-                            with archive.open(rel, "r") as source_file, \
+                            with archive.open(safe_rel, "r") as source_file, \
                                     target_file.open("wb") as output:
                                 shutil.copyfileobj(
                                     source_file,
@@ -3565,8 +3612,9 @@ class ParallelBackupApp:
                     if self.cancel_event.is_set():
                         raise RuntimeError("복구가 취소되었습니다.")
 
-                    source_file = backup / Path(rel)
-                    target_file = target / Path(rel)
+                    safe_rel = _safe_archive_member(rel)
+                    source_file = _safe_restore_path(backup, safe_rel)
+                    target_file = _safe_restore_path(target, safe_rel)
 
                     if not source_file.is_file():
                         raise FileNotFoundError(
@@ -3582,7 +3630,7 @@ class ParallelBackupApp:
                     self._advance_eta_work(1)
                     self.advance_progress()
 
-            verify_snapshot_sha256(
+            verify_restored_snapshot(
                 target,
                 manifest,
                 self.advance_progress,
