@@ -6,6 +6,7 @@ on:
       - "ParallelBackup.bat"
       - "app.py"
       - "parallel_backup_launcher.py"
+      - "backup_engine.py"
       - "tests/**"
       - ".github/workflows/test-windows-bat.yml"
   workflow_dispatch:
