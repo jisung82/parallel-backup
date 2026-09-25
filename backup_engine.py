@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import uuid
 import zipfile
 from datetime import datetime
@@ -30,6 +31,10 @@ def _safe_archive_member(app, name: str) -> str:
         raise ValueError(f"안전하지 않은 ZIP 경로: {name}")
 
     return "/".join(parts)
+
+
+def _get_app_module():
+    return sys.modules.get("app") or sys.modules["__main__"]
 
 
 def _copy_stream(source_handle, target_handle, cancel_event, work_callback):
@@ -187,7 +192,7 @@ def build_master_zip(
     if not destinations:
         raise ValueError("백업 대상이 없습니다.")
 
-    import app
+    app = _get_app_module()
 
     first_destination = destinations[0].resolve()
     first_destination.mkdir(parents=True, exist_ok=True)
@@ -393,7 +398,7 @@ def copy_master_archive(
     deep_scan: bool,
     master_sha256: str | None,
 ):
-    import app
+    app = _get_app_module()
 
     destination.mkdir(parents=True, exist_ok=True)
     app.cleanup_stale_partials(destination)
