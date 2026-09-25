@@ -38,7 +38,6 @@ class _BareNameVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_FunctionDef(self, node):
-        # Nested functions have their own scope and are checked separately.
         return
 
     def visit_AsyncFunctionDef(self, node):
@@ -49,11 +48,6 @@ class _BareNameVisitor(ast.NodeVisitor):
 
 
 def test_no_bare_cancel_event_reference():
-    """cancel_event must be passed explicitly or accessed as self.cancel_event.
-
-    Regression guard for the production crash:
-    NameError: name 'cancel_event' is not defined.
-    """
     tree = _load_tree()
     violations = []
 
@@ -77,7 +71,6 @@ def test_no_bare_cancel_event_reference():
 
 
 def test_callback_methods_exist():
-    """Callbacks passed through Tkinter scheduling/bind APIs must exist."""
     tree = _load_tree()
     class_methods = set()
 
@@ -90,7 +83,7 @@ def test_callback_methods_exist():
             }
             break
 
-    assert class_methods, "ParallelBackupApp class was not found"
+    assert class_methods
 
     callback_api_names = {"bind", "after", "after_idle", "after_cancel", "protocol"}
     missing = []
@@ -119,6 +112,31 @@ def test_callback_methods_exist():
     assert not missing, "\n".join(missing)
 
 
-# This file intentionally keeps the runtime NameError regression test enabled;
-# the legacy app.py path is still shipped for compatibility, while the BAT
-# launcher uses the no-TEMP engine.
+def test_legacy_callback_names_are_gone():
+    source = APP.read_text(encoding="utf-8")
+    assert "_autosize_window" not in source
+
+
+def test_temp_and_staging_references_are_gone_from_app():
+    source = APP.read_text(encoding="utf-8")
+    assert "tempfile" not in source
+    assert "parallel-backup-stage-" not in source
+    assert "parallel-backup-master-" not in source
+
+
+def test_restore_and_zip_helpers_are_defined():
+    tree = _load_tree()
+    names = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+    assert "_safe_archive_member" in names
+    assert "_safe_restore_path" in names
+    assert "verify_restored_snapshot" in names
+
+
+def test_main_is_importable_without_starting_gui():
+    compile( APP.read_text(encoding="utf-8"), str(APP), "exec")
+    source = APP.read_text(encoding="utf-8")
+    assert "def main():" in source
