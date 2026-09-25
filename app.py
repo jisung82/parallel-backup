@@ -8,7 +8,6 @@ import shutil
 import subprocess
 import threading
 import time
-import tempfile
 import uuid
 import urllib.error
 import urllib.request
@@ -21,17 +20,17 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
 APP_TITLE = "Parallel Backup"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.2"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
-SOURCE_CACHE_FILE = "source_cache.json"
 PROFILE_FILE = "profile.json"
 STALE_PARTIAL_SECONDS = 24 * 60 * 60
 DEFAULT_FREE_SPACE_RESERVE = 64 * 1024 * 1024
 UPDATE_APP_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/app.py"
 UPDATE_BAT_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/ParallelBackup.bat"
 UPDATE_ICON_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/assets/parallel_backup.ico"
+UPDATE_LAUNCHER_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/parallel_backup_launcher.py"
 
 
 def show_windows_notification(title, message):
@@ -117,10 +116,6 @@ def local_app_dir() -> Path:
     return path
 
 
-def source_cache_path() -> Path:
-    return local_app_dir() / SOURCE_CACHE_FILE
-
-
 def profile_path() -> Path:
     return local_app_dir() / PROFILE_FILE
 
@@ -139,10 +134,12 @@ def save_json_atomic(path: Path, data):
     os.replace(temp, path)
 
 
-def sha256_file(path: Path, work_callback=None) -> str:
+def sha256_file(path: Path, work_callback=None, cancel_event=None) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("작업이 취소되었습니다.")
             digest.update(chunk)
             if work_callback is not None:
                 work_callback(len(chunk))
@@ -236,6 +233,56 @@ def verify_zip_archive(
 
 
 
+
+def _safe_archive_member(name: str) -> str:
+    normalized = str(name).replace("\\", "/")
+    if "\x00" in normalized or not normalized:
+        raise ValueError(f"안전하지 않은 ZIP 경로: {name}")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
+        raise ValueError(f"안전하지 않은 ZIP 경로: {name}")
+    parts = [part for part in normalized.split("/") if part not in ("", ".")]
+    if not parts or any(part == ".." for part in parts):
+        raise ValueError(f"안전하지 않은 ZIP 경로: {name}")
+    if any(":" in part for part in parts):
+        raise ValueError(f"안전하지 않은 ZIP 경로: {name}")
+    return "/".join(parts)
+
+
+def _safe_restore_path(target_root: Path, rel: str) -> Path:
+    normalized = _safe_archive_member(rel)
+    root = target_root.resolve()
+    candidate = (root / Path(normalized)).resolve()
+    try:
+        if os.path.commonpath([str(root), str(candidate)]) != str(root):
+            raise ValueError(f"복구 경로가 대상 폴더를 벗어납니다: {rel}")
+    except ValueError:
+        raise ValueError(f"복구 경로가 대상 폴더를 벗어납니다: {rel}")
+    return candidate
+
+
+def verify_restored_snapshot(
+    target: Path,
+    manifest: dict,
+    progress_callback,
+    cancel_event,
+):
+    for rel, info in manifest.get("files", {}).items():
+        if cancel_event.is_set():
+            raise RuntimeError("복구 검증이 취소되었습니다.")
+        path = _safe_restore_path(target, rel)
+        if not path.is_file():
+            raise FileNotFoundError(f"복구 파일 없음: {rel}")
+        expected_size = info.get("size")
+        if expected_size is not None and path.stat().st_size != expected_size:
+            raise IOError(f"복구 파일 크기 불일치: {rel}")
+        expected_hash = info.get("sha256")
+        if expected_hash:
+            actual_hash = sha256_file(path, cancel_event=cancel_event)
+            if actual_hash != expected_hash:
+                raise IOError(f"복구 SHA-256 불일치: {rel}")
+        progress_callback()
+
+
 def normalize_patterns(raw: str):
     patterns = []
     for item in raw.replace("\n", ",").split(","):
@@ -254,65 +301,55 @@ def is_excluded(rel: str, patterns) -> bool:
     return False
 
 
-def load_source_cache() -> dict:
-    return load_json(source_cache_path(), {"version": 2, "sources": {}})
 
-
-def save_source_cache(cache: dict):
-    save_json_atomic(source_cache_path(), cache)
-
-
-def build_source_manifest(source: Path, deep_scan: bool, exclude_patterns):
+def build_source_manifest(
+    source: Path,
+    deep_scan: bool,
+    exclude_patterns,
+    cancel_event=None,
+):
     files = {}
     directories = set()
-    cache_hits = 0
-    cache_misses = 0
+    hashed_files = 0
     skipped = 0
 
-    cache = load_source_cache() if deep_scan else {"version": 2, "sources": {}}
-    source_key = str(source.resolve())
-    source_cache = cache.setdefault("sources", {}).setdefault(source_key, {})
-    cached_files = source_cache.get("files", {})
-
     for root, dirnames, filenames in os.walk(source):
-        root_path = Path(root)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("원본 분석이 취소되었습니다.")
 
+        root_path = Path(root)
         kept_dirs = []
+
         for dirname in dirnames:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("원본 분석이 취소되었습니다.")
             rel_dir = (root_path / dirname).relative_to(source).as_posix()
             if is_excluded(rel_dir, exclude_patterns):
                 continue
             kept_dirs.append(dirname)
             directories.add(rel_dir)
+
         dirnames[:] = kept_dirs
 
         for filename in filenames:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("원본 분석이 취소되었습니다.")
+
             src = root_path / filename
             rel = src.relative_to(source).as_posix()
-
             if is_excluded(rel, exclude_patterns):
                 skipped += 1
                 continue
 
             stat = src.stat()
-
             file_hash = None
-            if deep_scan:
-                cached = cached_files.get(rel)
-                valid_cache = bool(
-                    cached
-                    and cached.get("sha256")
-                    and cached.get("size") == stat.st_size
-                    and cached.get("mtime_ns") == stat.st_mtime_ns
-                    and cached.get("ctime_ns") == stat.st_ctime_ns
-                )
 
-                if valid_cache:
-                    file_hash = cached["sha256"]
-                    cache_hits += 1
-                else:
-                    file_hash = sha256_file(src)
-                    cache_misses += 1
+            if deep_scan:
+                file_hash = sha256_file(
+                    src,
+                    cancel_event=cancel_event,
+                )
+                hashed_files += 1
 
             files[rel] = {
                 "sha256": file_hash,
@@ -321,22 +358,13 @@ def build_source_manifest(source: Path, deep_scan: bool, exclude_patterns):
                 "ctime_ns": stat.st_ctime_ns,
             }
 
-    result = {
+    return {
         "files": files,
         "directories": sorted(directories),
-        "cache_hits": cache_hits,
-        "cache_misses": cache_misses,
+        "cache_hits": 0,
+        "cache_misses": hashed_files,
         "excluded": skipped,
     }
-
-    if deep_scan:
-        cache.setdefault("sources", {})[source_key] = {
-            "files": files,
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        save_source_cache(cache)
-
-    return result
 
 
 def write_manifest(target: Path, manifest: dict):
@@ -3171,6 +3199,7 @@ class ParallelBackupApp:
                 source,
                 deep_scan=deep_scan,
                 exclude_patterns=exclude_patterns,
+                cancel_event=self.cancel_event,
             )
             if self.cancel_event.is_set():
                 raise RuntimeError("백업이 취소되었습니다.")
@@ -3228,6 +3257,7 @@ class ParallelBackupApp:
                 master_sha256 = sha256_file(
                     master_archive,
                     work_callback=self._advance_eta_work,
+                    cancel_event=self.cancel_event,
                 )
             else:
                 master_sha256 = None
@@ -3373,238 +3403,18 @@ class ParallelBackupApp:
         hardlink: bool,
         exclude_patterns,
     ):
-        archive_name = make_unique_archive_name(
+        from backup_engine import build_master_zip
+        return build_master_zip(
+            self,
+            source,
+            base_name,
             destinations,
-            f"{base_name}.zip",
-        )
-
-        staging_root = Path(
-            tempfile.mkdtemp(prefix="parallel-backup-stage-")
-        )
-
-        previous_dir = None
-        previous_manifest = None
-        previous_archive = None
-
-        if incremental and destinations:
-            first_destination = destinations[0]
-            previous_archive, previous_manifest = find_latest_verified_archive(
-                first_destination,
-                f"{base_name.rsplit('_', 2)[0]}_",
-                source,
-            )
-
-            if previous_archive is None:
-                previous_dir, legacy_manifest = find_latest_verified_backup(
-                    first_destination,
-                    f"{base_name.rsplit('_', 2)[0]}_",
-                    source,
-                )
-                if previous_dir is not None:
-                    previous_manifest = legacy_manifest
-
-        if previous_archive is not None:
-            self.write_log(
-                f"[INCREMENTAL] 기준 ZIP: {previous_archive.name}"
-            )
-            with zipfile.ZipFile(previous_archive, "r") as archive:
-                archive.extractall(staging_root)
-        elif previous_dir is not None:
-            self.write_log(
-                f"[INCREMENTAL] 레거시 스냅샷 기준: {previous_dir.name}"
-            )
-            shutil.copytree(
-                previous_dir,
-                staging_root,
-                dirs_exist_ok=True,
-            )
-        else:
-            self.write_log("[INCREMENTAL] 기준 백업 없음 → 전체 구성")
-
-        if self.cancel_event.is_set():
-            raise RuntimeError("백업이 취소되었습니다.")
-
-        previous_files = (
-            previous_manifest.get("files", {})
-            if previous_manifest else {}
-        )
-
-        current_paths = set(source_data["files"])
-
-        # Remove the old manifest and files that no longer exist in the source.
-        old_manifest_dir = staging_root / MANIFEST_DIR
-        if old_manifest_dir.exists():
-            shutil.rmtree(old_manifest_dir, ignore_errors=True)
-
-        for staged_file in list(staging_root.rglob("*")):
-            if not staged_file.is_file():
-                continue
-            rel = staged_file.relative_to(staging_root).as_posix()
-            if rel not in current_paths:
-                try:
-                    staged_file.unlink()
-                except OSError:
-                    pass
-
-        copied = 0
-        reused = 0
-        snapshot_work_total = sum(
-            info["size"]
-            for rel, info in source_data["files"].items()
-            if not (
-                incremental
-                and previous_files.get(rel)
-                and (staging_root / Path(rel)).is_file()
-                and previous_files[rel].get("size") == info["size"]
-                and previous_files[rel].get("mtime_ns") == info["mtime_ns"]
-                and previous_files[rel].get("ctime_ns") == info["ctime_ns"]
-                and (
-                    not deep_scan
-                    or previous_files[rel].get("sha256") == info["sha256"]
-                )
-            )
-        )
-        self._set_eta_stage("스냅샷 구성", snapshot_work_total)
-
-        for rel, info in source_data["files"].items():
-            if self.cancel_event.is_set():
-                raise RuntimeError("백업이 취소되었습니다.")
-
-            src = source / Path(rel)
-            dst = staging_root / Path(rel)
-            old_info = previous_files.get(rel)
-            can_reuse = bool(
-                incremental
-                and old_info
-                and dst.is_file()
-                and old_info.get("size") == info["size"]
-                and old_info.get("mtime_ns") == info["mtime_ns"]
-                and old_info.get("ctime_ns") == info["ctime_ns"]
-                and (
-                    not deep_scan
-                    or old_info.get("sha256") == info["sha256"]
-                )
-            )
-
-            if can_reuse:
-                reused += 1
-            else:
-                snapshot_work_total += info["size"]
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                with (
-                    src.open("rb") as source_handle,
-                    dst.open("wb") as target_handle,
-                ):
-                    while True:
-                        if self.cancel_event.is_set():
-                            raise RuntimeError("백업이 취소되었습니다.")
-                        chunk = source_handle.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        target_handle.write(chunk)
-                        self._advance_eta_work(len(chunk))
-                shutil.copystat(src, dst)
-                copied += 1
-
-            self.advance_progress()
-
-        manifest = {
-            "version": 4,
-            "app_version": APP_VERSION,
-            "source": str(source.resolve()),
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "verified": False,
-            "verification": "sha256" if deep_scan else "fast",
-            "backup_name": Path(archive_name).stem,
-            "archive_name": archive_name,
-            "exclude_patterns": exclude_patterns,
-            "files": source_data["files"],
-            "directories": source_data["directories"],
-            "stats": {
-                "files": len(source_data["files"]),
-                "copied": copied,
-                "reused": reused,
-                "source_bytes": sum(
-                    item["size"] for item in source_data["files"].values()
-                ),
-            },
-        }
-
-        write_manifest(staging_root, manifest)
-
-        self.write_log(
-            f"[STAGE] copied={copied:,} reused={reused:,}"
-        )
-
-        self._set_operation("스냅샷 무결성 검사 중...")
-        self._set_timeline_stage(2)
-
-        if deep_scan:
-            verify_snapshot_sha256(
-                staging_root,
-                manifest,
-                self.advance_progress,
-                self.cancel_event,
-            )
-        else:
-            verify_snapshot_fast(
-                source,
-                staging_root,
-                manifest,
-                self.advance_progress,
-                self.cancel_event,
-            )
-
-        manifest["verified"] = True
-        write_manifest(staging_root, manifest)
-
-        if self.cancel_event.is_set():
-            raise RuntimeError("백업이 취소되었습니다.")
-
-        archive_path = Path(
-            tempfile.mkstemp(
-                prefix="parallel-backup-master-",
-                suffix=".zip",
-            )[1]
-        )
-
-        zip_source_bytes = sum(
-            info["size"] for info in source_data["files"].values()
-        )
-        self._set_operation(
-            f"ZIP 압축 중 · {archive_name}"
-        )
-        self._set_timeline_stage(3)
-        self._set_eta_stage("ZIP 압축", zip_source_bytes)
-        create_zip_archive(
-            staging_root,
-            archive_path,
-            self.advance_progress,
-            self.cancel_event,
-            self._advance_eta_work,
-        )
-
-        archive_size = archive_path.stat().st_size
-        self._set_operation(
-            f"ZIP 무결성 검사 중 · {archive_name}"
-        )
-        self._set_timeline_stage(4)
-        self._set_eta_stage("ZIP 검증", archive_size)
-        verify_zip_archive(
-            archive_path,
-            manifest,
-            self.advance_progress,
-            self.cancel_event,
+            source_data,
+            incremental,
             deep_scan,
-            self._advance_eta_work,
+            hardlink,
+            exclude_patterns,
         )
-
-        self.write_log(
-            f"[ZIP READY] {archive_name} · "
-            f"{archive_path.stat().st_size / (1024**3):.2f} GB"
-        )
-
-        return archive_path, archive_name, staging_root, manifest
 
     def _copy_master_archive(
         self,
@@ -3617,91 +3427,18 @@ class ParallelBackupApp:
         deep_scan: bool,
         master_sha256: str | None,
     ):
-        destination.mkdir(parents=True, exist_ok=True)
-        cleanup_stale_partials(destination)
-
-        target = destination / archive_name
-        partial = destination / (
-            f".parallel-backup.partial-{uuid.uuid4().hex}.zip"
+        from backup_engine import copy_master_archive
+        return copy_master_archive(
+            self,
+            master_archive,
+            archive_name,
+            destination,
+            source,
+            prefix,
+            keep,
+            deep_scan,
+            master_sha256,
         )
-
-        try:
-            required_bytes = master_archive.stat().st_size
-            ensure_free_space(destination, required_bytes)
-
-            self.write_log(
-                f"[COPY] {master_archive.name} -> {destination}"
-            )
-
-            with (
-                master_archive.open("rb") as source_handle,
-                partial.open("wb") as target_handle,
-            ):
-                while True:
-                    if self.cancel_event.is_set():
-                        raise RuntimeError("백업이 취소되었습니다.")
-                    chunk = source_handle.read(4 * 1024 * 1024)
-                    if not chunk:
-                        break
-                    target_handle.write(chunk)
-                    self._advance_eta_work(len(chunk))
-            shutil.copystat(master_archive, partial)
-            self.advance_progress()
-
-            if partial.stat().st_size != master_archive.stat().st_size:
-                raise IOError(
-                    f"ZIP 크기 불일치: {destination}"
-                )
-
-            if deep_scan:
-                copied_sha256 = sha256_file(partial)
-                if copied_sha256 != master_sha256:
-                    raise IOError(
-                        f"ZIP SHA-256 불일치: {destination}"
-                    )
-
-            os.replace(partial, target)
-            self.advance_progress()
-
-            archives = list_verified_archives(
-                destination,
-                prefix,
-                source,
-            )
-            for old_archive, _ in archives[keep:]:
-                try:
-                    old_archive.unlink()
-                    self.write_log(
-                        f"[RETENTION] 삭제: {old_archive.name}"
-                    )
-                except OSError as exc:
-                    self.write_log(
-                        f"[RETENTION FAIL] {old_archive.name} -> {exc}"
-                    )
-
-            self.write_log(
-                f"[COPY OK] {destination} -> {target.name}"
-            )
-            return {
-                "ok": True,
-                "destination": str(destination),
-                "archive": str(target),
-            }
-
-        except Exception as exc:
-            try:
-                partial.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-            self.write_log(
-                f"[COPY FAIL] {destination} -> {exc}"
-            )
-            return {
-                "ok": False,
-                "destination": str(destination),
-                "error": str(exc),
-            }
 
     def restore_backup(self):
         if self.running:
@@ -3919,7 +3656,11 @@ class ParallelBackupApp:
             self.root.after(0, finish_error)
 
 
-if __name__ == "__main__":
+def main():
     root = tk.Tk()
     ParallelBackupApp(root)
     root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
