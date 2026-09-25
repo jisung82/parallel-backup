@@ -3488,9 +3488,11 @@ class ParallelBackupApp:
             or manifest.get("version") not in (2, 3, 4)
             or manifest.get("verified") is not True
         ):
-            target_text = filedialog.askdirectory(
-                title="복구 대상 폴더 선택"
+            messagebox.showerror(
+                "복구 오류",
+                "검증 완료된 Parallel Backup v2/v3/v4 백업이 아닙니다.",
             )
+            return
 
         try:
             normalized_files = {}
@@ -3505,7 +3507,7 @@ class ParallelBackupApp:
         except Exception as exc:
             messagebox.showerror(
                 "복구 오류",
-                f"백업 경로 검증 실패:\n{exc}",
+                f"백업 경로 검증 실패:\\n{exc}",
             )
             return
 
@@ -3524,15 +3526,9 @@ class ParallelBackupApp:
             except Exception as exc:
                 messagebox.showerror(
                     "복구 오류",
-                    f"ZIP 무결성 검증 실패:\n{exc}",
+                    f"ZIP 무결성 검증 실패:\\n{exc}",
                 )
                 return
-
-            messagebox.showerror(
-                "복구 오류",
-                "검증 완료된 Parallel Backup v2/v3/v4 백업이 아닙니다.",
-            )
-            return
 
         target_text = filedialog.askdirectory(
             title="복구 대상 폴더 선택"
