@@ -63,19 +63,14 @@ def _copy_stream(source_handle, target_handle, cancel_event, work_callback):
 
 def _estimate_zip_upper_bound(source_data: dict) -> int:
     source_size = sum(info["size"] for info in source_data["files"].values())
-    metadata_bytes = sum(
-        512 + (len(rel.encode("utf-8")) * 2)
-        for rel in source_data["files"]
-    )
-    manifest_bytes = len(
-        json.dumps(source_data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    )
+    metadata_bytes = sum(512 + (len(rel.encode("utf-8")) * 2) for rel in source_data["files"])
+    manifest_bytes = len(json.dumps(source_data, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     return source_size + metadata_bytes + manifest_bytes + RESERVE_BYTES
 
 
 def cleanup_build_partials(app, destination: Path):
     if not destination.is_dir():
-        return
+        return 0
     now = time.time()
     removed = 0
     for item in destination.iterdir():
@@ -87,10 +82,7 @@ def cleanup_build_partials(app, destination: Path):
                 removed += 1
         except OSError:
             pass
-    if removed:
-        # Cleanup is intentionally quiet for normal runs; callers log the actual build path.
-        return removed
-    return 0
+    return removed
 
 
 def verify_zip_archive_strict(
@@ -112,13 +104,8 @@ def verify_zip_archive_strict(
             raise IOError(f"ZIP CRC 오류: {bad}")
 
         infos = archive.infolist()
-        names = [
-            _safe_archive_member(app, info.filename)
-            for info in infos
-            if not info.is_dir()
-        ]
+        names = [_safe_archive_member(app, info.filename) for info in infos if not info.is_dir()]
         name_set = set(names)
-
         if len(names) != len(name_set):
             raise IOError("ZIP 내부 중복 파일명이 발견되었습니다.")
         if manifest_member not in name_set:
@@ -137,16 +124,13 @@ def verify_zip_archive_strict(
                 continue
             if cancel_event.is_set():
                 raise RuntimeError("ZIP 검증이 취소되었습니다.")
-
             rel = _safe_archive_member(app, info.filename)
             expected_info = expected.get(rel)
             if expected_info is None:
                 raise IOError(f"manifest에 없는 ZIP 파일: {rel}")
             expected_size = expected_info.get("size")
             if expected_size is not None and info.file_size != expected_size:
-                raise IOError(
-                    f"ZIP 크기 불일치: {rel} (expected={expected_size}, actual={info.file_size})"
-                )
+                raise IOError(f"ZIP 크기 불일치: {rel} (expected={expected_size}, actual={info.file_size})")
 
             digest = hashlib.sha256() if deep_scan else None
             with archive.open(info, "r") as handle:
@@ -157,16 +141,13 @@ def verify_zip_archive_strict(
                         digest.update(chunk)
                     if work_callback is not None:
                         work_callback(len(chunk))
-
             if digest is not None:
                 expected_hash = expected_info.get("sha256")
                 if not expected_hash:
                     raise IOError(f"정밀 검증용 SHA-256이 manifest에 없습니다: {rel}")
                 actual_hash = digest.hexdigest()
                 if expected_hash != actual_hash:
-                    raise IOError(
-                        f"ZIP SHA-256 불일치: {rel} (expected={expected_hash}, actual={actual_hash})"
-                    )
+                    raise IOError(f"ZIP SHA-256 불일치: {rel} (expected={expected_hash}, actual={actual_hash})")
             progress_callback()
 
 
@@ -194,7 +175,7 @@ def build_master_zip(
 
     archive_name = app.make_unique_archive_name(destinations, f"{base_name}.zip")
     _log(self, f"[PLAN] master={first_destination / archive_name}")
-    _log(self, f"[PLAN] build={first_destination / (BUILD_PREFIX + '...zip.partial')}")
+    _log(self, f"[PLAN] multi_target={len(destinations)}")
 
     previous_archive = None
     previous_manifest = None
@@ -211,8 +192,7 @@ def build_master_zip(
                 previous_names = {
                     _safe_archive_member(app, info.filename)
                     for info in previous_zip.infolist()
-                    if not info.is_dir()
-                    and info.filename != f"{app.MANIFEST_DIR}/{app.MANIFEST_FILE}"
+                    if not info.is_dir() and info.filename != f"{app.MANIFEST_DIR}/{app.MANIFEST_FILE}"
                 }
             _log(self, f"[INCREMENTAL] 기준 멤버={len(previous_names):,}")
         else:
@@ -222,16 +202,10 @@ def build_master_zip(
 
     required = _estimate_zip_upper_bound(source_data)
     free = shutil.disk_usage(first_destination).free
-    _log(
-        self,
-        f"[DISK PREFLIGHT] target={first_destination} free={free / (1024**3):.2f} GB "
-        f"estimated_need<={required / (1024**3):.2f} GB",
-    )
+    _log(self, f"[DISK PREFLIGHT] target={first_destination} free={free / (1024**3):.2f} GB need<={required / (1024**3):.2f} GB")
     if free < required:
         raise OSError(
-            f"백업 대상 공간 부족: {first_destination} · "
-            f"보수적 필요량 {required / (1024**3):.2f} GB · "
-            f"현재 여유 {free / (1024**3):.2f} GB"
+            f"백업 대상 공간 부족: {first_destination} · 보수적 필요량 {required / (1024**3):.2f} GB · 현재 여유 {free / (1024**3):.2f} GB"
         )
 
     archive_path = first_destination / f"{BUILD_PREFIX}{uuid.uuid4().hex}.zip.partial"
@@ -254,23 +228,18 @@ def build_master_zip(
             "source_bytes": sum(item["size"] for item in source_data["files"].values()),
         },
     }
-
     previous_files = previous_manifest.get("files", {}) if previous_manifest else {}
     copied = 0
     reused = 0
     total_files = len(source_data["files"])
+
     _log(self, f"[ZIP BEGIN] files={total_files:,} source={source}")
     self._set_operation(f"ZIP 직접 생성 중 · {archive_name}")
     self._set_timeline_stage(3)
     self._set_eta_stage("ZIP 압축", manifest["stats"]["source_bytes"])
 
     try:
-        with zipfile.ZipFile(
-            archive_path,
-            mode="w",
-            compression=zipfile.ZIP_DEFLATED,
-            compresslevel=6,
-        ) as out_zip:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as out_zip:
             previous_zip = None
             try:
                 if previous_archive is not None:
@@ -281,15 +250,13 @@ def build_master_zip(
                     member = _safe_archive_member(app, rel)
                     old = previous_files.get(rel)
                     can_reuse = bool(
-                        previous_zip is not None
-                        and old
+                        previous_zip is not None and old
                         and old.get("size") == info.get("size")
                         and old.get("mtime_ns") == info.get("mtime_ns")
                         and old.get("ctime_ns") == info.get("ctime_ns")
                         and (not deep_scan or old.get("sha256") == info.get("sha256"))
                         and member in previous_names
                     )
-
                     with out_zip.open(member, "w") as target_handle:
                         if can_reuse:
                             with previous_zip.open(member, "r") as source_handle:
@@ -308,7 +275,6 @@ def build_master_zip(
             finally:
                 if previous_zip is not None:
                     previous_zip.close()
-
             manifest["stats"]["copied"] = copied
             manifest["stats"]["reused"] = reused
             out_zip.writestr(
@@ -318,28 +284,15 @@ def build_master_zip(
 
         if self.cancel_event.is_set():
             raise RuntimeError("백업이 취소되었습니다.")
-
         archive_size = archive_path.stat().st_size
         _log(self, f"[ZIP BUILT] path={archive_path} size={archive_size / (1024**3):.2f} GB")
         self._set_operation(f"ZIP 무결성 검사 중 · {archive_name}")
         self._set_timeline_stage(4)
         self._set_eta_stage("ZIP 검증", archive_size)
         _log(self, f"[VERIFY BEGIN] archive={archive_path.name} mode={'SHA-256' if deep_scan else 'CRC+size'}")
-        verify_zip_archive_strict(
-            app,
-            archive_path,
-            manifest,
-            self.advance_progress,
-            self.cancel_event,
-            deep_scan,
-            self._advance_eta_work,
-        )
+        verify_zip_archive_strict(app, archive_path, manifest, self.advance_progress, self.cancel_event, deep_scan, self._advance_eta_work)
         _log(self, f"[VERIFY OK] archive={archive_path.name} files={total_files:,} deep_scan={deep_scan}")
-        _log(
-            self,
-            f"[ZIP READY] {archive_name} · size={archive_size / (1024**3):.2f} GB · "
-            f"copied={copied:,} reused={reused:,} · location={first_destination}",
-        )
+        _log(self, f"[ZIP READY] {archive_name} · size={archive_size / (1024**3):.2f} GB · copied={copied:,} reused={reused:,} · location={first_destination}")
         return archive_path, archive_name, None, manifest
     except Exception:
         try:
@@ -364,10 +317,7 @@ def _verify_target_zip(self, target: Path, destination: Path, deep_scan: bool, m
         _log(self, f"[TARGET SHA BEGIN] destination={destination}")
         copied_sha256 = app.sha256_file(target, cancel_event=self.cancel_event)
         if copied_sha256 != master_sha256:
-            raise IOError(
-                f"ZIP SHA-256 불일치: {destination} "
-                f"(expected={master_sha256}, actual={copied_sha256})"
-            )
+            raise IOError(f"ZIP SHA-256 불일치: {destination} (expected={master_sha256}, actual={copied_sha256})")
         _log(self, f"[TARGET SHA OK] destination={destination} sha256={copied_sha256}")
 
 
@@ -392,8 +342,7 @@ def copy_master_archive(
     try:
         _log(self, f"[TARGET BEGIN] destination={destination} source_is_master={source_is_local_master}")
         if source_is_local_master:
-            # CRITICAL: never os.replace(master_archive, target) here.
-            # Other worker threads may still be reading master_archive.
+            # Never rename the master partial here: other destination workers can still read it.
             if master_sha256:
                 _log(self, f"[MASTER SHA CHECK] local master={master_archive.name}")
                 actual = app.sha256_file(master_archive, cancel_event=self.cancel_event)
@@ -406,17 +355,14 @@ def copy_master_archive(
             try:
                 os.link(master_archive, local_link)
                 os.replace(local_link, target)
-                _log(self, "[LOCAL FINALIZE OK] hardlink created; master partial remains readable")
+                _log(self, "[LOCAL FINALIZE OK] master partial remains readable for other workers")
             except OSError as exc:
                 try:
                     local_link.unlink(missing_ok=True)
                 except OSError:
                     pass
-                raise OSError(
-                    f"첫 번째 백업 대상의 안전한 ZIP 확정에 실패했습니다. "
-                    f"master partial은 유지되었습니다: {exc}"
-                ) from exc
-            self._verify_target_zip(self, target, destination, deep_scan, master_sha256)
+                raise OSError(f"첫 번째 백업 대상 ZIP 확정 실패: {exc}") from exc
+            _verify_target_zip(self, target, destination, deep_scan, master_sha256)
             self.advance_progress()
         else:
             required_bytes = master_archive.stat().st_size
@@ -424,7 +370,6 @@ def copy_master_archive(
             _log(self, f"[COPY PREFLIGHT] destination={destination} free={free / (1024**3):.2f} GB need={required_bytes / (1024**3):.2f} GB")
             app.ensure_free_space(destination, required_bytes)
             _log(self, f"[COPY BEGIN] {master_archive.name} -> {destination} partial={partial.name}")
-            copied_bytes = 0
             started = time.monotonic()
             with master_archive.open("rb") as source_handle, partial.open("wb") as target_handle:
                 copied_bytes = _copy_stream(source_handle, target_handle, self.cancel_event, self._advance_eta_work)
@@ -434,7 +379,7 @@ def copy_master_archive(
                 raise IOError(f"ZIP 크기 불일치: {destination}")
             os.replace(partial, target)
             _log(self, f"[COPY COMMIT] destination={destination} target={target.name}")
-            self._verify_target_zip(self, target, destination, deep_scan, master_sha256)
+            _verify_target_zip(self, target, destination, deep_scan, master_sha256)
             self.advance_progress()
 
         archives = app.list_verified_archives(destination, prefix, source)
@@ -444,7 +389,6 @@ def copy_master_archive(
                 _log(self, f"[RETENTION] 삭제: {old_archive.name}")
             except OSError as exc:
                 _log(self, f"[RETENTION FAIL] {old_archive.name} -> {exc}")
-
         _log(self, f"[TARGET OK] destination={destination} target={target.name}")
         return {"ok": True, "destination": str(destination), "archive": str(target)}
     except Exception as exc:
