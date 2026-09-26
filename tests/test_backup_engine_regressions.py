@@ -33,11 +33,12 @@ def test_bat_uses_python_launcher():
     assert 'python "%~dp0app.py"' not in source
 
 
-def test_partial_cleanup_is_explicit():
+def test_master_partial_is_not_renamed_while_parallel_workers_run():
     source = ENGINE.read_text(encoding="utf-8")
-    assert "archive_path.unlink(missing_ok=True)" in source
-    assert "partial.unlink(missing_ok=True)" in source
-    assert "os.replace(master_archive, target)" in source
+    assert "os.link(master_archive, local_link)" in source
+    assert "os.replace(local_link, target)" in source
+    assert "os.replace(master_archive, target)" not in source
+    assert "master partial remains readable" in source
 
 
 def test_zip_verification_checks_missing_extra_crc_and_sha():
@@ -107,20 +108,11 @@ def test_strict_zip_verifier_detects_extra_member(tmp_path):
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("ok.txt", "ok")
         zf.writestr("extra.txt", "x")
-        zf.writestr(
-            ".parallel-backup/manifest.json",
-            json.dumps(manifest),
-        )
+        zf.writestr(".parallel-backup/manifest.json", json.dumps(manifest))
 
     try:
         verify_zip_archive_strict(
-            app,
-            archive,
-            manifest,
-            lambda: None,
-            threading.Event(),
-            False,
-            None,
+            app, archive, manifest, lambda: None, threading.Event(), False, None
         )
     except IOError as exc:
         assert "manifest에 없는 ZIP 파일" in str(exc)
@@ -162,25 +154,17 @@ def test_no_temp_engine_builds_directly_into_destination(tmp_path):
     destination.mkdir()
     (source / "hello.txt").write_text("hello", encoding="utf-8")
 
-    cancel_event = threading.Event()
     source_data = app.build_source_manifest(
         source,
         deep_scan=True,
         exclude_patterns=[],
-        cancel_event=cancel_event,
+        cancel_event=threading.Event(),
     )
 
     dummy = Dummy()
     archive_path, _archive_name, staging_root, manifest = build_master_zip(
-        dummy,
-        source,
-        "test_20260926_000000",
-        [destination],
-        source_data,
-        False,
-        True,
-        False,
-        [],
+        dummy, source, "test_20260926_000000", [destination], source_data,
+        False, True, False, []
     )
 
     assert archive_path.parent.resolve() == destination.resolve()
@@ -190,3 +174,80 @@ def test_no_temp_engine_builds_directly_into_destination(tmp_path):
     assert staging_root is None
     assert manifest["verified"] is True
     archive_path.unlink()
+
+
+def test_parallel_destinations_keep_master_readable(tmp_path):
+    import threading
+    import app
+    from backup_engine import build_master_zip, copy_master_archive
+
+    class Dummy:
+        def __init__(self):
+            self.cancel_event = threading.Event()
+            self.events = []
+
+        def write_log(self, message):
+            self.events.append(message)
+
+        def _set_operation(self, status):
+            self.events.append(status)
+
+        def _set_timeline_stage(self, stage, **kwargs):
+            pass
+
+        def _set_eta_stage(self, name, total):
+            pass
+
+        def _advance_eta_work(self, amount):
+            pass
+
+        def advance_progress(self):
+            pass
+
+    source = tmp_path / "source"
+    destination1 = tmp_path / "destination1"
+    destination2 = tmp_path / "destination2"
+    source.mkdir()
+    destination1.mkdir()
+    destination2.mkdir()
+    (source / "a.txt").write_text("alpha", encoding="utf-8")
+    (source / "b.txt").write_text("beta", encoding="utf-8")
+
+    source_data = app.build_source_manifest(
+        source,
+        deep_scan=False,
+        exclude_patterns=[],
+        cancel_event=threading.Event(),
+    )
+    dummy = Dummy()
+    master, archive_name, _staging, _manifest = build_master_zip(
+        dummy,
+        source,
+        "parallel_race_20260927_000000",
+        [destination1, destination2],
+        source_data,
+        False,
+        False,
+        False,
+        [],
+    )
+
+    first = copy_master_archive(
+        dummy, master, archive_name, destination1, source,
+        "parallel_race_", 10, False, None,
+    )
+    assert first["ok"] is True
+    assert master.is_file(), "master partial must remain readable after first target finalize"
+
+    second = copy_master_archive(
+        dummy, master, archive_name, destination2, source,
+        "parallel_race_", 10, False, None,
+    )
+    assert second["ok"] is True
+    assert (destination1 / archive_name).is_file()
+    assert (destination2 / archive_name).is_file()
+    assert (destination1 / archive_name).read_bytes() == (destination2 / archive_name).read_bytes()
+    assert any("[LOCAL FINALIZE OK]" in event for event in dummy.events)
+    assert any("[TARGET OK]" in event for event in dummy.events)
+
+    master.unlink()
