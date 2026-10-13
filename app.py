@@ -9,6 +9,7 @@ import sys
 import subprocess
 import threading
 import time
+import traceback
 import uuid
 import urllib.error
 import urllib.request
@@ -18,10 +19,11 @@ from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
+from diagnostics import DiagnosticLogger
 
 
 APP_TITLE = "Parallel Backup"
-APP_VERSION = "1.6.2"
+APP_VERSION = "1.6.3"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
@@ -644,6 +646,7 @@ class ParallelBackupApp:
 
         self.destinations = []
         self.running = False
+        self.diagnostics = DiagnosticLogger()
         self.cancel_event = threading.Event()
         self.progress_lock = threading.Lock()
         self.progress_value = 0
@@ -2714,12 +2717,25 @@ class ParallelBackupApp:
         self._load_destination_rows(profile.get("destinations", []))
 
     def write_log(self, message):
+        # Persistent disk log first: a GUI crash must not erase useful diagnostics.
+        message = str(message)
+        self.diagnostics.write(message)
+        stamp = datetime.now().strftime("%H:%M:%S")
+        entry = f"[{stamp}] {message}"
+
         def update():
-            self.log.configure(state="normal")
-            self.log.insert("end", message + "\n")
-            self.log.see("end")
-            self.log.configure(state="disabled")
-        self.root.after(0, update)
+            try:
+                self.log.configure(state="normal")
+                self.log.insert("end", entry + "\n")
+                self.log.see("end")
+                self.log.configure(state="disabled")
+            except tk.TclError:
+                pass
+        try:
+            self.root.after(0, update)
+        except (tk.TclError, RuntimeError):
+            pass
+
 
     def _format_elapsed(self, seconds):
         seconds = max(0, int(seconds))
@@ -3159,8 +3175,13 @@ class ParallelBackupApp:
         self._set_timeline_stage(0)
         self._start_operation_timer()
 
+        logfile = self.diagnostics.start("backup")
+        self.write_log(f"[VERSION] {APP_VERSION} log_path={logfile}")
         self.write_log(f"[START] {source}")
         self.write_log(f"[TARGETS] {len(destinations)}개 | workers={parallel}")
+        for index, destination in enumerate(destinations, 1):
+            self.write_log(f"[TARGET CONFIG] #{index} path={destination}")
+        self.write_log("[STORAGE POLICY] A full compressed ZIP is retained for each target/snapshot; no full-size staging in system TEMP.")
         self.write_log(f"[NAME] {base_name}")
         self.write_log(f"[KEEP] {keep}")
         self.write_log(
@@ -3275,32 +3296,69 @@ class ParallelBackupApp:
                 f"size={archive_size / (1024**3):.2f} GB"
             )
 
-            workers = min(parallel, len(destinations))
+            # Remote copies run in parallel. Local master is committed LAST so
+            # workers can always read the .partial master until they finish.
+            remote_destinations = [
+                destination for destination in destinations
+                if destination.resolve() != master_archive.parent.resolve()
+            ]
+            local_destinations = [
+                destination for destination in destinations
+                if destination.resolve() == master_archive.parent.resolve()
+            ]
+            workers = min(parallel, max(1, len(remote_destinations)))
             results = []
-
+            self.write_log(
+                f"[COPY PLAN] remotes={len(remote_destinations)} "
+                f"local={len(local_destinations)} workers={workers} "
+                f"master={master_archive} bytes={archive_size:,}"
+            )
             self._set_operation(
                 f"ZIP 병렬 복사 중 · {len(destinations)}개 대상"
             )
             self._set_timeline_stage(5)
+            if remote_destinations:
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    future_map = {
+                        executor.submit(
+                            self._copy_master_archive,
+                            master_archive,
+                            archive_name,
+                            destination,
+                            source,
+                            base_name + "_",
+                            keep,
+                            deep_scan,
+                            master_sha256,
+                        ): destination
+                        for destination in remote_destinations
+                    }
+                    for future in as_completed(future_map):
+                        destination = future_map[future]
+                        try:
+                            results.append(future.result())
+                        except Exception:
+                            self.write_log(
+                                f"[WORKER CRASH] destination={destination}\n"
+                                f"{traceback.format_exc()}"
+                            )
+                            results.append({
+                                "ok": False, "destination": str(destination),
+                                "error": "Unhandled worker exception",
+                            })
 
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                future_map = {
-                    executor.submit(
-                        self._copy_master_archive,
-                        master_archive,
-                        archive_name,
-                        destination,
-                        source,
-                        base_name + "_",
-                        keep,
-                        deep_scan,
-                        master_sha256,
-                    ): destination
-                    for destination in destinations
-                }
+            if self.cancel_event.is_set():
+                raise RuntimeError("백업이 취소되었습니다.")
 
-                for future in as_completed(future_map):
-                    results.append(future.result())
+            for destination in local_destinations:
+                self.write_log(
+                    f"[LOCAL FINALIZE BEGIN] destination={destination} "
+                    f"all_remote_workers_finished=True"
+                )
+                results.append(self._copy_master_archive(
+                    master_archive, archive_name, destination,
+                    source, base_name + "_", keep, deep_scan, master_sha256,
+                ))
 
             if self.cancel_event.is_set():
                 raise RuntimeError("백업이 취소되었습니다.")
@@ -3360,7 +3418,8 @@ class ParallelBackupApp:
 
         except Exception as exc:
             error_text = str(exc)
-            self.write_log(f"[FATAL] {error_text}")
+            self.write_log(f"[FATAL] {type(exc).__name__}: {error_text}")
+            self.write_log(f"[TRACEBACK]\n{traceback.format_exc()}")
 
             def finish_error():
                 self.running = False
@@ -3394,9 +3453,15 @@ class ParallelBackupApp:
         finally:
             if master_archive is not None:
                 try:
-                    Path(master_archive).unlink(missing_ok=True)
-                except OSError:
-                    pass
+                    remaining = Path(master_archive)
+                    old_size = remaining.stat().st_size if remaining.exists() else 0
+                    remaining.unlink(missing_ok=True)
+                    self.write_log(
+                        f"[MASTER CLEANUP] path={remaining} freed_bytes={old_size:,} "
+                        f"already_committed={old_size == 0}"
+                    )
+                except OSError as cleanup_exc:
+                    self.write_log(f"[MASTER CLEANUP FAIL] path={master_archive} error={cleanup_exc}")
             if staging_root is not None:
                 shutil.rmtree(staging_root, ignore_errors=True)
 
