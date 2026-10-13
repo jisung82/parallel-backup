@@ -3311,6 +3311,13 @@ class ParallelBackupApp:
                 f"size={archive_size / (1024**3):.2f} GB"
             )
 
+            # Stable family prefix: retention must not include the per-run timestamp.
+            # Previously base_name + "_" matched no older ZIPs and leaked storage.
+            retention_prefix = base_name.rsplit("_", 2)[0] + "_"
+            self.write_log(
+                f"[RETENTION PLAN] prefix={retention_prefix!r} keep={keep} "
+                f"target_count={len(destinations)}"
+            )
             # Remote copies run in parallel. Local master is committed LAST so
             # workers can always read the .partial master until they finish.
             remote_destinations = [
@@ -3341,7 +3348,7 @@ class ParallelBackupApp:
                             archive_name,
                             destination,
                             source,
-                            base_name + "_",
+                            retention_prefix,
                             keep,
                             deep_scan,
                             master_sha256,
@@ -3372,7 +3379,7 @@ class ParallelBackupApp:
                 )
                 results.append(self._copy_master_archive(
                     master_archive, archive_name, destination,
-                    source, base_name + "_", keep, deep_scan, master_sha256,
+                    source, retention_prefix, keep, deep_scan, master_sha256,
                 ))
 
             if self.cancel_event.is_set():
