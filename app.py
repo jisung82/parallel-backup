@@ -35,6 +35,7 @@ UPDATE_BAT_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/mai
 UPDATE_ICON_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/assets/parallel_backup.ico"
 UPDATE_LAUNCHER_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/parallel_backup_launcher.py"
 UPDATE_ENGINE_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/backup_engine.py"
+UPDATE_DIAGNOSTICS_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/diagnostics.py"
 
 
 def show_windows_notification(title, message):
@@ -1310,6 +1311,10 @@ class ParallelBackupApp:
                 UPDATE_ENGINE_URL,
                 update_dir / "backup_engine.py",
             )
+            self._download_update_file(
+                UPDATE_DIAGNOSTICS_URL,
+                update_dir / "diagnostics.py",
+            )
 
             try:
                 self._download_update_file(
@@ -1339,6 +1344,7 @@ class ParallelBackupApp:
                 "copy /Y \"%UPDATE_DIR%\\ParallelBackup.bat\" \"%APP_DIR%\\ParallelBackup.bat\" >nul\\r\\n"
                 "copy /Y \"%UPDATE_DIR%\\parallel_backup_launcher.py\" \"%APP_DIR%\\parallel_backup_launcher.py\" >nul\\r\\n"
                 "copy /Y \"%UPDATE_DIR%\\backup_engine.py\" \"%APP_DIR%\\backup_engine.py\" >nul\\r\\n"
+                "copy /Y \"%UPDATE_DIR%\\diagnostics.py\" \"%APP_DIR%\\diagnostics.py\" >nul\\r\\n"
                 "if exist \"%UPDATE_DIR%\\parallel_backup.ico\" (\\r\\n"
                 "  if not exist \"%APP_DIR%\\assets\" mkdir \"%APP_DIR%\\assets\"\\r\\n"
                 "  copy /Y \"%UPDATE_DIR%\\parallel_backup.ico\" \"%APP_DIR%\\assets\\parallel_backup.ico\" >nul\\r\\n"
@@ -2125,6 +2131,7 @@ class ParallelBackupApp:
         self._refresh_header()
 
     def _compare_log(self, message):
+        self.diagnostics.write(str(message))
         def update():
             self.compare_log.configure(state="normal")
             self.compare_log.insert("end", message + "\n")
@@ -2348,6 +2355,13 @@ class ParallelBackupApp:
             return
         left=Path(self.compare_source_var.get().strip())
         right=Path(self.compare_target_var.get().strip())
+        if not any((
+            self.compare_size_var.get(),
+            self.compare_mtime_var.get(),
+            self.compare_sha_var.get(),
+        )):
+            messagebox.showerror("비교 오류", "비교 기준을 최소 하나 선택하세요.")
+            return
         if not left.is_dir() or not right.is_dir():
             messagebox.showerror("비교 오류","두 비교 경로를 모두 지정하세요.")
             return
@@ -2360,6 +2374,7 @@ class ParallelBackupApp:
         self._set_compare_timeline(0)
         self._start_compare_timer()
         self.compare_button.configure(state="disabled")
+        self.diagnostics.start("compare")
         self._compare_log(f"[START] {left}")
         self._compare_log(f"[TARGET] {right}")
         threading.Thread(
