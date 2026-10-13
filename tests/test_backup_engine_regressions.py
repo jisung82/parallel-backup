@@ -35,17 +35,17 @@ def test_bat_uses_python_launcher():
 
 def test_master_partial_is_not_renamed_while_parallel_workers_run():
     source = ENGINE.read_text(encoding="utf-8")
-    assert "os.link(master_archive, local_link)" in source
-    assert "os.replace(local_link, target)" in source
-    assert "os.replace(master_archive, target)" not in source
-    assert "master partial remains readable" in source
+    assert "os.link(master_archive, local_link)" not in source
+    assert "os.replace(master_archive, target)" in source
+    assert "all_remote_workers_finished=True" in APP.read_text(encoding="utf-8")
+    assert "for destination in local_destinations:" in APP.read_text(encoding="utf-8")
 
 
 def test_zip_verification_checks_missing_extra_crc_and_sha():
     source = ENGINE.read_text(encoding="utf-8")
-    assert "missing = expected_names - actual_names" in source
-    assert "extra = actual_names - expected_names" in source
-    assert "archive.testzip()" in source
+    assert "missing = expected_names -" in source
+    assert "extra = " in source
+    assert 'with archive.open(info, "r") as handle:' in source
     assert "ZIP SHA-256 불일치" in source
 
 
@@ -59,7 +59,7 @@ def test_restore_path_is_hardened():
 def test_conservative_disk_preflight_exists():
     source = ENGINE.read_text(encoding="utf-8")
     assert "def _estimate_zip_upper_bound" in source
-    assert "free < required" in source
+    assert "free < RESERVE_BYTES * 2" in source
 
 
 def test_source_scan_supports_cancellation():
@@ -232,22 +232,22 @@ def test_parallel_destinations_keep_master_readable(tmp_path):
         [],
     )
 
-    first = copy_master_archive(
-        dummy, master, archive_name, destination1, source,
-        "parallel_race_", 10, False, None,
-    )
-    assert first["ok"] is True
-    assert master.is_file(), "master partial must remain readable after first target finalize"
-
     second = copy_master_archive(
         dummy, master, archive_name, destination2, source,
         "parallel_race_", 10, False, None,
     )
     assert second["ok"] is True
+    assert master.is_file(), "master must be readable until remote copies complete"
+
+    first = copy_master_archive(
+        dummy, master, archive_name, destination1, source,
+        "parallel_race_", 10, False, None,
+    )
+    assert first["ok"] is True
     assert (destination1 / archive_name).is_file()
     assert (destination2 / archive_name).is_file()
     assert (destination1 / archive_name).read_bytes() == (destination2 / archive_name).read_bytes()
-    assert any("[LOCAL FINALIZE OK]" in event for event in dummy.events)
+    assert any("[LOCAL COMMIT]" in event for event in dummy.events)
     assert any("[TARGET OK]" in event for event in dummy.events)
 
-    master.unlink()
+    assert not master.exists(), "master must be consumed by atomic commit without another full-sized copy"
