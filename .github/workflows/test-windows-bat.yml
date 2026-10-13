@@ -8,7 +8,9 @@ on:
       - "parallel_backup_launcher.py"
       - "backup_engine.py"
       - "diagnostics.py"
+      - "storage_report.py"
       - "diagnostics.py"
+      - "storage_report.py"
       - "tests/**"
       - ".github/workflows/test-windows-bat.yml"
   pull_request:
@@ -53,7 +55,7 @@ jobs:
       - name: Verify all Python syntax
         shell: cmd
         run: |
-          py -3 -m py_compile app.py backup_engine.py diagnostics.py parallel_backup_launcher.py
+          py -3 -m py_compile app.py backup_engine.py diagnostics.py storage_report.py parallel_backup_launcher.py
           py -3 -m compileall -q tests
 
       - name: Run regression tests
@@ -64,4 +66,4 @@ jobs:
       - name: Check undefined names in all project Python
         shell: cmd
         run: |
-          py -3 -m pyflakes app.py backup_engine.py diagnostics.py parallel_backup_launcher.py tests
+          py -3 -m pyflakes app.py backup_engine.py diagnostics.py storage_report.py parallel_backup_launcher.py tests
