@@ -26,7 +26,7 @@ def directory_bytes(root):
     return total
 
 
-def inspect_path(directory, deep):
+def inspect_path(directory, deep, only_owned=False):
     if not directory.exists():
         print(f"  (not found) {directory}")
         return
@@ -41,7 +41,7 @@ def inspect_path(directory, deep):
         return
     for item in children:
         if not (
-            item.suffix.lower() == ".zip"
+            (not only_owned and item.suffix.lower() == ".zip")
             or item.name.startswith((
                 ".parallel-backup-build-", ".parallel-backup.partial-",
                 "parallel-backup-stage-", "parallel-backup-master-",
@@ -81,7 +81,7 @@ def main():
         inspect_path(Path(path).expanduser(), args.deep)
 
     print("[LEGACY TEMP]")
-    inspect_path(Path(tempfile.gettempdir()), args.deep)
+    inspect_path(Path(tempfile.gettempdir()), args.deep, only_owned=True)
 
     logs = local_base / "ParallelBackup" / "logs"
     if logs.is_dir():
