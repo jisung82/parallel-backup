@@ -256,3 +256,43 @@ def test_atomic_restore_success_replaces_file(tmp_path):
     assert size == len(data)
     assert target.read_bytes() == data
     assert not list(tmp_path.glob(".parallel-backup-restore-*.partial"))
+
+
+def test_retention_removes_older_timestamped_zips(tmp_path):
+    """A prior bug used the current timestamp as the retention prefix."""
+    source = tmp_path / "source"
+    destination = tmp_path / "backups"
+    source.mkdir()
+    destination.mkdir()
+    (source / "data.txt").write_bytes(b"stable content")
+    fake = FakeApp()
+    old_name = None
+    for timestamp in ("20261013_000001", "20261013_000002"):
+        manifest = app.build_source_manifest(
+            source, deep_scan=False, exclude_patterns=[],
+            cancel_event=threading.Event(),
+        )
+        master, name, _, _ = engine.build_master_zip(
+            fake, source, f"project_{timestamp}", [destination],
+            manifest, False, False, False, [],
+        )
+        result = engine.copy_master_archive(
+            fake, master, name, destination, source,
+            "project_", 1, False, None,
+        )
+        assert result["ok"] is True
+        if old_name is not None:
+            assert not (destination / old_name).exists(), (
+                "retention must delete a previous timestamped ZIP"
+            )
+        old_name = name
+    assert len(list(destination.glob("project_*.zip"))) == 1
+    assert any("[RETENTION] removed=" in event for event in fake.events)
+
+
+def test_retention_prefix_not_timestamped():
+    code = (Path(__file__).parents[1] / "app.py").read_text(encoding="utf-8")
+    assert 'retention_prefix = base_name.rsplit("_", 2)[0] + "_"' in code
+    assert "base_name + \"_\"," not in code[
+        code.index("    def run_backup("):code.index("    def _build_master_zip(")
+    ]
