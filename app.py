@@ -9,6 +9,7 @@ import sys
 import subprocess
 import threading
 import time
+import traceback
 import uuid
 import urllib.error
 import urllib.request
@@ -18,10 +19,11 @@ from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
+from diagnostics import DiagnosticLogger
 
 
 APP_TITLE = "Parallel Backup"
-APP_VERSION = "1.6.2"
+APP_VERSION = "1.6.3"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 MANIFEST_DIR = ".parallel-backup"
 MANIFEST_FILE = "manifest.json"
@@ -33,6 +35,7 @@ UPDATE_BAT_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/mai
 UPDATE_ICON_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/assets/parallel_backup.ico"
 UPDATE_LAUNCHER_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/parallel_backup_launcher.py"
 UPDATE_ENGINE_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/backup_engine.py"
+UPDATE_DIAGNOSTICS_URL = "https://raw.githubusercontent.com/jisung82/parallel-backup/main/diagnostics.py"
 
 
 def show_windows_notification(title, message):
@@ -644,6 +647,7 @@ class ParallelBackupApp:
 
         self.destinations = []
         self.running = False
+        self.diagnostics = DiagnosticLogger()
         self.cancel_event = threading.Event()
         self.progress_lock = threading.Lock()
         self.progress_value = 0
@@ -1307,6 +1311,10 @@ class ParallelBackupApp:
                 UPDATE_ENGINE_URL,
                 update_dir / "backup_engine.py",
             )
+            self._download_update_file(
+                UPDATE_DIAGNOSTICS_URL,
+                update_dir / "diagnostics.py",
+            )
 
             try:
                 self._download_update_file(
@@ -1336,6 +1344,7 @@ class ParallelBackupApp:
                 "copy /Y \"%UPDATE_DIR%\\ParallelBackup.bat\" \"%APP_DIR%\\ParallelBackup.bat\" >nul\\r\\n"
                 "copy /Y \"%UPDATE_DIR%\\parallel_backup_launcher.py\" \"%APP_DIR%\\parallel_backup_launcher.py\" >nul\\r\\n"
                 "copy /Y \"%UPDATE_DIR%\\backup_engine.py\" \"%APP_DIR%\\backup_engine.py\" >nul\\r\\n"
+                "copy /Y \"%UPDATE_DIR%\\diagnostics.py\" \"%APP_DIR%\\diagnostics.py\" >nul\\r\\n"
                 "if exist \"%UPDATE_DIR%\\parallel_backup.ico\" (\\r\\n"
                 "  if not exist \"%APP_DIR%\\assets\" mkdir \"%APP_DIR%\\assets\"\\r\\n"
                 "  copy /Y \"%UPDATE_DIR%\\parallel_backup.ico\" \"%APP_DIR%\\assets\\parallel_backup.ico\" >nul\\r\\n"
@@ -2122,6 +2131,7 @@ class ParallelBackupApp:
         self._refresh_header()
 
     def _compare_log(self, message):
+        self.diagnostics.write(str(message))
         def update():
             self.compare_log.configure(state="normal")
             self.compare_log.insert("end", message + "\n")
@@ -2345,6 +2355,13 @@ class ParallelBackupApp:
             return
         left=Path(self.compare_source_var.get().strip())
         right=Path(self.compare_target_var.get().strip())
+        if not any((
+            self.compare_size_var.get(),
+            self.compare_mtime_var.get(),
+            self.compare_sha_var.get(),
+        )):
+            messagebox.showerror("비교 오류", "비교 기준을 최소 하나 선택하세요.")
+            return
         if not left.is_dir() or not right.is_dir():
             messagebox.showerror("비교 오류","두 비교 경로를 모두 지정하세요.")
             return
@@ -2357,6 +2374,7 @@ class ParallelBackupApp:
         self._set_compare_timeline(0)
         self._start_compare_timer()
         self.compare_button.configure(state="disabled")
+        self.diagnostics.start("compare")
         self._compare_log(f"[START] {left}")
         self._compare_log(f"[TARGET] {right}")
         threading.Thread(
@@ -2714,12 +2732,25 @@ class ParallelBackupApp:
         self._load_destination_rows(profile.get("destinations", []))
 
     def write_log(self, message):
+        # Persistent disk log first: a GUI crash must not erase useful diagnostics.
+        message = str(message)
+        self.diagnostics.write(message)
+        stamp = datetime.now().strftime("%H:%M:%S")
+        entry = f"[{stamp}] {message}"
+
         def update():
-            self.log.configure(state="normal")
-            self.log.insert("end", message + "\n")
-            self.log.see("end")
-            self.log.configure(state="disabled")
-        self.root.after(0, update)
+            try:
+                self.log.configure(state="normal")
+                self.log.insert("end", entry + "\n")
+                self.log.see("end")
+                self.log.configure(state="disabled")
+            except tk.TclError:
+                pass
+        try:
+            self.root.after(0, update)
+        except (tk.TclError, RuntimeError):
+            pass
+
 
     def _format_elapsed(self, seconds):
         seconds = max(0, int(seconds))
@@ -3159,8 +3190,13 @@ class ParallelBackupApp:
         self._set_timeline_stage(0)
         self._start_operation_timer()
 
+        logfile = self.diagnostics.start("backup")
+        self.write_log(f"[VERSION] {APP_VERSION} log_path={logfile}")
         self.write_log(f"[START] {source}")
         self.write_log(f"[TARGETS] {len(destinations)}개 | workers={parallel}")
+        for index, destination in enumerate(destinations, 1):
+            self.write_log(f"[TARGET CONFIG] #{index} path={destination}")
+        self.write_log("[STORAGE POLICY] A full compressed ZIP is retained for each target/snapshot; no full-size staging in system TEMP.")
         self.write_log(f"[NAME] {base_name}")
         self.write_log(f"[KEEP] {keep}")
         self.write_log(
@@ -3275,32 +3311,76 @@ class ParallelBackupApp:
                 f"size={archive_size / (1024**3):.2f} GB"
             )
 
-            workers = min(parallel, len(destinations))
+            # Stable family prefix: retention must not include the per-run timestamp.
+            # Previously base_name + "_" matched no older ZIPs and leaked storage.
+            retention_prefix = base_name.rsplit("_", 2)[0] + "_"
+            self.write_log(
+                f"[RETENTION PLAN] prefix={retention_prefix!r} keep={keep} "
+                f"target_count={len(destinations)}"
+            )
+            # Remote copies run in parallel. Local master is committed LAST so
+            # workers can always read the .partial master until they finish.
+            remote_destinations = [
+                destination for destination in destinations
+                if destination.resolve() != master_archive.parent.resolve()
+            ]
+            local_destinations = [
+                destination for destination in destinations
+                if destination.resolve() == master_archive.parent.resolve()
+            ]
+            workers = min(parallel, max(1, len(remote_destinations)))
             results = []
-
+            self.write_log(
+                f"[COPY PLAN] remotes={len(remote_destinations)} "
+                f"local={len(local_destinations)} workers={workers} "
+                f"master={master_archive} bytes={archive_size:,}"
+            )
             self._set_operation(
                 f"ZIP 병렬 복사 중 · {len(destinations)}개 대상"
             )
             self._set_timeline_stage(5)
+            if remote_destinations:
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    future_map = {
+                        executor.submit(
+                            self._copy_master_archive,
+                            master_archive,
+                            archive_name,
+                            destination,
+                            source,
+                            retention_prefix,
+                            keep,
+                            deep_scan,
+                            master_sha256,
+                        ): destination
+                        for destination in remote_destinations
+                    }
+                    for future in as_completed(future_map):
+                        destination = future_map[future]
+                        try:
+                            results.append(future.result())
+                        except Exception:
+                            self.write_log(
+                                f"[WORKER CRASH] destination={destination}\n"
+                                f"{traceback.format_exc()}"
+                            )
+                            results.append({
+                                "ok": False, "destination": str(destination),
+                                "error": "Unhandled worker exception",
+                            })
 
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                future_map = {
-                    executor.submit(
-                        self._copy_master_archive,
-                        master_archive,
-                        archive_name,
-                        destination,
-                        source,
-                        base_name + "_",
-                        keep,
-                        deep_scan,
-                        master_sha256,
-                    ): destination
-                    for destination in destinations
-                }
+            if self.cancel_event.is_set():
+                raise RuntimeError("백업이 취소되었습니다.")
 
-                for future in as_completed(future_map):
-                    results.append(future.result())
+            for destination in local_destinations:
+                self.write_log(
+                    f"[LOCAL FINALIZE BEGIN] destination={destination} "
+                    f"all_remote_workers_finished=True"
+                )
+                results.append(self._copy_master_archive(
+                    master_archive, archive_name, destination,
+                    source, retention_prefix, keep, deep_scan, master_sha256,
+                ))
 
             if self.cancel_event.is_set():
                 raise RuntimeError("백업이 취소되었습니다.")
@@ -3360,7 +3440,8 @@ class ParallelBackupApp:
 
         except Exception as exc:
             error_text = str(exc)
-            self.write_log(f"[FATAL] {error_text}")
+            self.write_log(f"[FATAL] {type(exc).__name__}: {error_text}")
+            self.write_log(f"[TRACEBACK]\n{traceback.format_exc()}")
 
             def finish_error():
                 self.running = False
@@ -3394,9 +3475,15 @@ class ParallelBackupApp:
         finally:
             if master_archive is not None:
                 try:
-                    Path(master_archive).unlink(missing_ok=True)
-                except OSError:
-                    pass
+                    remaining = Path(master_archive)
+                    old_size = remaining.stat().st_size if remaining.exists() else 0
+                    remaining.unlink(missing_ok=True)
+                    self.write_log(
+                        f"[MASTER CLEANUP] path={remaining} freed_bytes={old_size:,} "
+                        f"already_committed={old_size == 0}"
+                    )
+                except OSError as cleanup_exc:
+                    self.write_log(f"[MASTER CLEANUP FAIL] path={master_archive} error={cleanup_exc}")
             if staging_root is not None:
                 shutil.rmtree(staging_root, ignore_errors=True)
 
@@ -3561,6 +3648,8 @@ class ParallelBackupApp:
         self._set_timeline_stage(5)
         self._start_operation_timer()
 
+        logfile = self.diagnostics.start("restore")
+        self.write_log(f"[RESTORE LOGFILE] {logfile}")
         self.write_log(f"[RESTORE] {backup}")
         self.write_log(f"[RESTORE TARGET] {target}")
         self.write_log(f"[RESTORE FILES] {len(files):,}")
@@ -3578,53 +3667,50 @@ class ParallelBackupApp:
         restored = 0
         is_archive = backup.is_file() and backup.suffix.lower() == ".zip"
 
+        from backup_engine import restore_member_atomic
+        self.write_log("[RESTORE PLAN] one-file-at-a-time atomic writes; temporary files are stored alongside each target file, never system TEMP.")
+        self.write_log("[RESTORE MODE] file SHA-256 checked only when manifest contains a hash; standard mode checks sizes.")
         try:
             if is_archive:
                 with zipfile.ZipFile(backup, "r") as archive:
-                    for rel in manifest["files"]:
+                    for rel, info in manifest["files"].items():
                         if self.cancel_event.is_set():
                             raise RuntimeError("복구가 취소되었습니다.")
-
                         safe_rel = _safe_archive_member(rel)
                         target_file = _safe_restore_path(target, safe_rel)
-                        target_file.parent.mkdir(parents=True, exist_ok=True)
-
                         try:
-                            with archive.open(safe_rel, "r") as source_file, \
-                                    target_file.open("wb") as output:
-                                shutil.copyfileobj(
-                                    source_file,
-                                    output,
-                                    length=1024 * 1024,
+                            with archive.open(safe_rel, "r") as source_file:
+                                restored_bytes = restore_member_atomic(
+                                    source_file, target_file, info, self.cancel_event,
                                 )
-                        except KeyError:
-                            raise FileNotFoundError(
-                                f"ZIP 내부 파일 없음: {rel}"
-                            )
-
+                        except KeyError as missing:
+                            raise FileNotFoundError(f"ZIP 내부 파일 없음: {rel}") from missing
                         restored += 1
+                        if restored == 1 or restored % 1000 == 0:
+                            self.write_log(
+                                f"[RESTORE PROGRESS] files={restored:,} last={target_file} bytes={restored_bytes:,}"
+                            )
                         self._advance_eta_work(1)
                         self.advance_progress()
             else:
-                for rel in manifest["files"]:
+                for rel, info in manifest["files"].items():
                     if self.cancel_event.is_set():
                         raise RuntimeError("복구가 취소되었습니다.")
-
                     safe_rel = _safe_archive_member(rel)
                     source_file = _safe_restore_path(backup, safe_rel)
                     target_file = _safe_restore_path(target, safe_rel)
-
                     if not source_file.is_file():
-                        raise FileNotFoundError(
-                            f"백업 파일 없음: {rel}"
+                        raise FileNotFoundError(f"백업 파일 없음: {rel}")
+                    with source_file.open("rb") as inp:
+                        restored_bytes = restore_member_atomic(
+                            inp, target_file, info, self.cancel_event,
                         )
-
-                    target_file.parent.mkdir(
-                        parents=True,
-                        exist_ok=True,
-                    )
-                    shutil.copy2(source_file, target_file)
+                    shutil.copystat(source_file, target_file)
                     restored += 1
+                    if restored == 1 or restored % 1000 == 0:
+                        self.write_log(
+                            f"[RESTORE PROGRESS] files={restored:,} last={target_file} bytes={restored_bytes:,}"
+                        )
                     self._advance_eta_work(1)
                     self.advance_progress()
 
@@ -3655,11 +3741,11 @@ class ParallelBackupApp:
                 )
                 show_windows_notification(
                     "Parallel Backup · 복구 완료",
-                    f"{restored:,}개 파일 복구 + SHA-256 검증 완료 · {elapsed_text}",
+                    f"{restored:,}개 파일 복구 · 무결성 검사 완료 · {elapsed_text}",
                 )
                 messagebox.showinfo(
                     "복구 완료",
-                    f"{restored:,}개 파일 복구 + SHA-256 검증 완료\n"
+                    f"{restored:,}개 파일 복구 · 무결성 검사 완료\n"
                     f"소요 시간: {elapsed_text}",
                 )
 
@@ -3667,9 +3753,8 @@ class ParallelBackupApp:
 
         except Exception as exc:
             error_text = str(exc)
-            self.write_log(
-                f"[RESTORE FAIL] {error_text}"
-            )
+            self.write_log(f"[RESTORE FAIL] {type(exc).__name__}: {error_text}")
+            self.write_log(f"[RESTORE TRACEBACK]\\n{traceback.format_exc()}")
 
             def finish_error():
                 self.running = False
