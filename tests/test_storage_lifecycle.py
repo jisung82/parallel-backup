@@ -200,3 +200,59 @@ def test_master_build_uses_no_system_temp(tmp_path, monkeypatch):
     assert master.parent == destinations[0]
     assert not list(temp_location.iterdir())
     master.unlink()
+
+
+@pytest.mark.parametrize("corruption", [False, True])
+def test_atomic_restore_preserves_existing_target_on_abort_or_bad_hash(tmp_path, corruption):
+    import io
+    import hashlib
+    from backup_engine import restore_member_atomic
+
+    target = tmp_path / "existing.txt"
+    target.write_bytes(b"ORIGINAL SAFE DATA")
+    data = b"replacement data" * 5000
+    expected_hash = hashlib.sha256(data).hexdigest()
+    if corruption:
+        expected_hash = "0" * 64
+
+    class InterruptibleReader:
+        def __init__(self, source, cancel):
+            self.source = source
+            self.cancel = cancel
+            self.calls = 0
+
+        def read(self, amount):
+            self.calls += 1
+            result = self.source.read(min(amount, 100))
+            if not corruption and self.calls == 1:
+                self.cancel.set()
+            return result
+
+    cancel = threading.Event()
+    reader = InterruptibleReader(io.BytesIO(data), cancel)
+    with pytest.raises((RuntimeError, IOError)):
+        restore_member_atomic(
+            reader, target,
+            {"size": len(data), "sha256": expected_hash},
+            cancel,
+        )
+    assert target.read_bytes() == b"ORIGINAL SAFE DATA"
+    assert not list(tmp_path.glob(".parallel-backup-restore-*.partial"))
+
+
+def test_atomic_restore_success_replaces_file(tmp_path):
+    import io
+    import hashlib
+    from backup_engine import restore_member_atomic
+
+    target = tmp_path / "target.txt"
+    target.write_bytes(b"old")
+    data = b"new-data" * 1000
+    size = restore_member_atomic(
+        io.BytesIO(data), target,
+        {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()},
+        threading.Event(),
+    )
+    assert size == len(data)
+    assert target.read_bytes() == data
+    assert not list(tmp_path.glob(".parallel-backup-restore-*.partial"))
