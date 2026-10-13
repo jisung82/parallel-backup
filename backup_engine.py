@@ -434,3 +434,40 @@ def copy_master_archive(
         except OSError as cleanup_exc:
             _log(self, f"[PARTIAL CLEANUP FAIL] path={partial} error={cleanup_exc}")
         return {"ok": committed, "destination": str(destination), "archive": str(target) if committed else None, "error": str(exc)}
+
+
+def restore_member_atomic(input_handle, target: Path, info: dict, cancel_event, work_callback=None):
+    """Restore one file via a same-directory partial; keep existing files on failure."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.parent / f".parallel-backup-restore-{uuid.uuid4().hex}.partial"
+    expected_size = info.get("size")
+    expected_hash = info.get("sha256")
+    digest = hashlib.sha256() if expected_hash else None
+    restored_bytes = 0
+    try:
+        with partial.open("wb") as out:
+            while True:
+                if cancel_event.is_set():
+                    raise RuntimeError("복구가 취소되었습니다.")
+                chunk = input_handle.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                out.write(chunk)
+                restored_bytes += len(chunk)
+                if digest is not None:
+                    digest.update(chunk)
+                if work_callback is not None:
+                    work_callback(len(chunk))
+        if expected_size is not None and restored_bytes != expected_size:
+            raise IOError(f"복구 크기 불일치: {target}, expected={expected_size}, actual={restored_bytes}")
+        if expected_hash and digest.hexdigest() != expected_hash:
+            raise IOError(f"복구 SHA-256 불일치: {target}")
+        if cancel_event.is_set():
+            raise RuntimeError("복구가 취소되었습니다.")
+        os.replace(partial, target)
+        return restored_bytes
+    finally:
+        try:
+            partial.unlink(missing_ok=True)
+        except OSError:
+            pass
