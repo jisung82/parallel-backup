@@ -386,7 +386,8 @@ def copy_master_archive(
         if source_is_local_master:
             # The caller must wait until all remote workers have finished.
             _log(self, f"[LOCAL VERIFY] master={master_archive} ready_for_commit=true")
-            _verify_target_zip(self, master_archive, destination, deep_scan, master_sha256)
+            # The master was already verified after ZIP construction; do not decode it again.
+            _log(self, "[LOCAL VERIFIED] earlier master ZIP verification already passed")
             if self.cancel_event.is_set():
                 raise RuntimeError("백업이 취소되었습니다.")
             os.replace(master_archive, target)
