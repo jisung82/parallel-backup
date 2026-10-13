@@ -3641,6 +3641,8 @@ class ParallelBackupApp:
         self._set_timeline_stage(5)
         self._start_operation_timer()
 
+        logfile = self.diagnostics.start("restore")
+        self.write_log(f"[RESTORE LOGFILE] {logfile}")
         self.write_log(f"[RESTORE] {backup}")
         self.write_log(f"[RESTORE TARGET] {target}")
         self.write_log(f"[RESTORE FILES] {len(files):,}")
@@ -3658,53 +3660,50 @@ class ParallelBackupApp:
         restored = 0
         is_archive = backup.is_file() and backup.suffix.lower() == ".zip"
 
+        from backup_engine import restore_member_atomic
+        self.write_log("[RESTORE PLAN] one-file-at-a-time atomic writes; temporary files are stored alongside each target file, never system TEMP.")
+        self.write_log("[RESTORE MODE] file SHA-256 checked only when manifest contains a hash; standard mode checks sizes.")
         try:
             if is_archive:
                 with zipfile.ZipFile(backup, "r") as archive:
-                    for rel in manifest["files"]:
+                    for rel, info in manifest["files"].items():
                         if self.cancel_event.is_set():
                             raise RuntimeError("복구가 취소되었습니다.")
-
                         safe_rel = _safe_archive_member(rel)
                         target_file = _safe_restore_path(target, safe_rel)
-                        target_file.parent.mkdir(parents=True, exist_ok=True)
-
                         try:
-                            with archive.open(safe_rel, "r") as source_file, \
-                                    target_file.open("wb") as output:
-                                shutil.copyfileobj(
-                                    source_file,
-                                    output,
-                                    length=1024 * 1024,
+                            with archive.open(safe_rel, "r") as source_file:
+                                restored_bytes = restore_member_atomic(
+                                    source_file, target_file, info, self.cancel_event,
                                 )
-                        except KeyError:
-                            raise FileNotFoundError(
-                                f"ZIP 내부 파일 없음: {rel}"
-                            )
-
+                        except KeyError as missing:
+                            raise FileNotFoundError(f"ZIP 내부 파일 없음: {rel}") from missing
                         restored += 1
+                        if restored == 1 or restored % 1000 == 0:
+                            self.write_log(
+                                f"[RESTORE PROGRESS] files={restored:,} last={target_file} bytes={restored_bytes:,}"
+                            )
                         self._advance_eta_work(1)
                         self.advance_progress()
             else:
-                for rel in manifest["files"]:
+                for rel, info in manifest["files"].items():
                     if self.cancel_event.is_set():
                         raise RuntimeError("복구가 취소되었습니다.")
-
                     safe_rel = _safe_archive_member(rel)
                     source_file = _safe_restore_path(backup, safe_rel)
                     target_file = _safe_restore_path(target, safe_rel)
-
                     if not source_file.is_file():
-                        raise FileNotFoundError(
-                            f"백업 파일 없음: {rel}"
+                        raise FileNotFoundError(f"백업 파일 없음: {rel}")
+                    with source_file.open("rb") as inp:
+                        restored_bytes = restore_member_atomic(
+                            inp, target_file, info, self.cancel_event,
                         )
-
-                    target_file.parent.mkdir(
-                        parents=True,
-                        exist_ok=True,
-                    )
-                    shutil.copy2(source_file, target_file)
+                    shutil.copystat(source_file, target_file)
                     restored += 1
+                    if restored == 1 or restored % 1000 == 0:
+                        self.write_log(
+                            f"[RESTORE PROGRESS] files={restored:,} last={target_file} bytes={restored_bytes:,}"
+                        )
                     self._advance_eta_work(1)
                     self.advance_progress()
 
@@ -3735,11 +3734,11 @@ class ParallelBackupApp:
                 )
                 show_windows_notification(
                     "Parallel Backup · 복구 완료",
-                    f"{restored:,}개 파일 복구 + SHA-256 검증 완료 · {elapsed_text}",
+                    f"{restored:,}개 파일 복구 · 무결성 검사 완료 · {elapsed_text}",
                 )
                 messagebox.showinfo(
                     "복구 완료",
-                    f"{restored:,}개 파일 복구 + SHA-256 검증 완료\n"
+                    f"{restored:,}개 파일 복구 · 무결성 검사 완료\n"
                     f"소요 시간: {elapsed_text}",
                 )
 
@@ -3747,9 +3746,8 @@ class ParallelBackupApp:
 
         except Exception as exc:
             error_text = str(exc)
-            self.write_log(
-                f"[RESTORE FAIL] {error_text}"
-            )
+            self.write_log(f"[RESTORE FAIL] {type(exc).__name__}: {error_text}")
+            self.write_log(f"[RESTORE TRACEBACK]\\n{traceback.format_exc()}")
 
             def finish_error():
                 self.running = False
