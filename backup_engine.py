@@ -351,11 +351,21 @@ def _verify_target_zip(self, target: Path, destination: Path, deep_scan: bool, m
             raise IOError(f"대상 ZIP SHA-256 불일치: {destination}")
         _log(self, f"[TARGET SHA OK] destination={destination} sha256={actual}")
     else:
+        checked_bytes = 0
         with zipfile.ZipFile(target, "r") as archive:
-            bad = archive.testzip()
-        if bad is not None:
-            raise IOError(f"대상 ZIP CRC 오류: {destination} -> {bad}")
-        _log(self, f"[TARGET CRC OK] destination={destination}")
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                with archive.open(info, "r") as handle:
+                    while True:
+                        if self.cancel_event.is_set():
+                            raise RuntimeError("대상 ZIP 검증이 취소되었습니다.")
+                        chunk = handle.read(CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        checked_bytes += len(chunk)
+                # Reading each member to EOF checks its CRC.
+        _log(self, f"[TARGET CRC OK] destination={destination} uncompressed_checked_bytes={checked_bytes:,}")
 
 
 def copy_master_archive(
